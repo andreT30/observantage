@@ -47,6 +47,16 @@ END deploy_mgr_pkg;
 create or replace PACKAGE BODY deploy_mgr_pkg AS
 
   ------------------------------------------------------------------------------
+  -- Forward declaration for internal script runner
+  ------------------------------------------------------------------------------
+  PROCEDURE run_sql_script(
+    p_run_id      IN NUMBER,
+    p_script      IN CLOB,
+    p_script_name IN VARCHAR2,
+    p_dry_run     IN BOOLEAN DEFAULT FALSE
+  );
+
+  ------------------------------------------------------------------------------
   -- Logging helpers
   ------------------------------------------------------------------------------
   PROCEDURE run_log(p_run_id IN NUMBER, p_msg IN VARCHAR2) IS
