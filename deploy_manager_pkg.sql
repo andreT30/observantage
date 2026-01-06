@@ -427,12 +427,46 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
     RETURN l_out;
   END;
 
-  ------------------------------------------------------------------------------
-  -- CHATBOT_* seed export (parameters, components, glossary rules/keywords)
-  ------------------------------------------------------------------------------
+  ----------------------------------------------------------------------------
+  -- CHATBOT_* seed export
+  ----------------------------------------------------------------------------
   FUNCTION export_chatbot_seed RETURN CLOB IS
-    l_out       CLOB := EMPTY_CLOB();
-    l_schema    VARCHAR2(128);
+    l_out     CLOB := EMPTY_CLOB();
+    l_schema  VARCHAR2(128);
+
+    -- Simple helpers for quoting
+    FUNCTION q(v VARCHAR2) RETURN VARCHAR2 IS
+    BEGIN
+      IF v IS NULL THEN
+        RETURN 'NULL';
+      ELSE
+        RETURN 'q''~' || REPLACE(v, '~', '~~') || '~''';
+      END IF;
+    END;
+
+    FUNCTION q_clob(c CLOB) RETURN VARCHAR2 IS
+      l_v VARCHAR2(32767);
+    BEGIN
+      IF c IS NULL THEN
+        RETURN 'NULL';
+      ELSE
+        -- truncate to 32767 chars; increase if you need larger exports
+        l_v := DBMS_LOB.SUBSTR(c, 32767, 1);
+        RETURN 'TO_CLOB(q''~' || REPLACE(l_v, '~', '~~') || '~'')';
+      END IF;
+    END;
+
+    FUNCTION q_ts(p_ts TIMESTAMP) RETURN VARCHAR2 IS
+    BEGIN
+      IF p_ts IS NULL THEN
+        RETURN 'NULL';
+      ELSE
+        RETURN 'TO_TIMESTAMP(''' ||
+               TO_CHAR(p_ts, 'YYYY-MM-DD HH24:MI:SS.FF6') ||
+               ''',''YYYY-MM-DD HH24:MI:SS.FF6'')';
+      END IF;
+    END;
+
   BEGIN
     DBMS_LOB.CREATETEMPORARY(l_out, TRUE);
     SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') INTO l_schema FROM dual;
@@ -440,130 +474,195 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
     DBMS_LOB.APPEND(
       l_out,
         '/* Seed data for CHATBOT_* tables exported from source environment. */' || CHR(10) ||
-        '/* Adjust schema prefix (' || LOWER(l_schema) || ') if needed before running manually. */' || CHR(10) ||
+        '/* Tables: CHATBOT_PARAMETERS, CHATBOT_PARAMETER_COMPONENT, CHATBOT_GLOSSARY_RULES, CHATBOT_GLOSSARY_KEYWORDS */' || CHR(10) ||
         CHR(10)
     );
 
-    --------------------------------------------------------------------------
+    ------------------------------------------------------------------------
     -- 1) CHATBOT_PARAMETERS
-    --    Adjust key and column list to your actual table definition.
-    --------------------------------------------------------------------------
-    DBMS_LOB.APPEND(l_out,
-      '/* CHATBOT_PARAMETERS */' || CHR(10) ||
-      '/* TODO: adjust column list / keys to your actual structure. */' || CHR(10) ||
-      '/* Example MERGE (replace cols and key as needed): */' || CHR(10) ||
-      '/*' || CHR(10) ||
-      'MERGE INTO ' || LOWER(l_schema) || '.CHATBOT_PARAMETERS t' || CHR(10) ||
-      'USING (' || CHR(10) ||
-      '  SELECT :PARAM_ID       AS PARAM_ID,' || CHR(10) ||
-      '         :DATASET_ID     AS DATASET_ID,' || CHR(10) ||
-      '         :PARAM_KEY      AS PARAM_KEY,' || CHR(10) ||
-      '         :PARAM_JSON     AS PARAM_JSON' || CHR(10) ||
-      '  FROM dual' || CHR(10) ||
-      ') s' || CHR(10) ||
-      'ON (t.PARAM_ID = s.PARAM_ID)' || CHR(10) ||
-      'WHEN MATCHED THEN UPDATE SET' || CHR(10) ||
-      '  t.DATASET_ID = s.DATASET_ID,' || CHR(10) ||
-      '  t.PARAM_KEY  = s.PARAM_KEY,' || CHR(10) ||
-      '  t.PARAM_JSON = s.PARAM_JSON' || CHR(10) ||
-      'WHEN NOT MATCHED THEN INSERT (' || CHR(10) ||
-      '  PARAM_ID, DATASET_ID, PARAM_KEY, PARAM_JSON' || CHR(10) ||
-      ') VALUES (' || CHR(10) ||
-      '  s.PARAM_ID, s.DATASET_ID, s.PARAM_KEY, s.PARAM_JSON' || CHR(10) ||
-      ');' || CHR(10) ||
-      '*/' || CHR(10) || CHR(10)
-    );
+    ------------------------------------------------------------------------
+    DBMS_LOB.APPEND(l_out, '/* CHATBOT_PARAMETERS */' || CHR(10) || CHR(10));
 
-    --------------------------------------------------------------------------
-    -- 2) CHATBOT_PARAMETER_COMPONENTS
-    --------------------------------------------------------------------------
-    DBMS_LOB.APPEND(l_out,
-      '/* CHATBOT_PARAMETER_COMPONENTS */' || CHR(10) ||
-      '/* TODO: adjust column list / keys to your actual structure. */' || CHR(10) ||
-      '/* Example MERGE (replace cols and key as needed): */' || CHR(10) ||
-      '/*' || CHR(10) ||
-      'MERGE INTO ' || LOWER(l_schema) || '.CHATBOT_PARAMETER_COMPONENTS t' || CHR(10) ||
-      'USING (' || CHR(10) ||
-      '  SELECT :COMPONENT_ID   AS COMPONENT_ID,' || CHR(10) ||
-      '         :PARAM_ID       AS PARAM_ID,' || CHR(10) ||
-      '         :COMPONENT_KEY  AS COMPONENT_KEY,' || CHR(10) ||
-      '         :COMPONENT_JSON AS COMPONENT_JSON' || CHR(10) ||
-      '  FROM dual' || CHR(10) ||
-      ') s' || CHR(10) ||
-      'ON (t.COMPONENT_ID = s.COMPONENT_ID)' || CHR(10) ||
-      'WHEN MATCHED THEN UPDATE SET' || CHR(10) ||
-      '  t.PARAM_ID       = s.PARAM_ID,' || CHR(10) ||
-      '  t.COMPONENT_KEY  = s.COMPONENT_KEY,' || CHR(10) ||
-      '  t.COMPONENT_JSON = s.COMPONENT_JSON' || CHR(10) ||
-      'WHEN NOT MATCHED THEN INSERT (' || CHR(10) ||
-      '  COMPONENT_ID, PARAM_ID, COMPONENT_KEY, COMPONENT_JSON' || CHR(10) ||
-      ') VALUES (' || CHR(10) ||
-      '  s.COMPONENT_ID, s.PARAM_ID, s.COMPONENT_KEY, s.COMPONENT_JSON' || CHR(10) ||
-      ');' || CHR(10) ||
-      '*/' || CHR(10) || CHR(10)
-    );
+    FOR r IN (
+      SELECT ID,
+             COMPONENT_TYPE,
+             CONTENT,
+             ACTIVE,
+             DATASET,
+             CREATED_AT,
+             ENVIRONMENT
+        FROM CHATBOT_PARAMETERS
+       ORDER BY ID
+    ) LOOP
+      DBMS_LOB.APPEND(
+        l_out,
+          'MERGE INTO ' || LOWER(l_schema) || '.CHATBOT_PARAMETERS t' || CHR(10) ||
+          'USING (' || CHR(10) ||
+          '  SELECT ' || r.ID || ' AS ID,' || CHR(10) ||
+          '         ' || q(r.COMPONENT_TYPE) || ' AS COMPONENT_TYPE,' || CHR(10) ||
+          '         ' || q_clob(r.CONTENT)   || ' AS CONTENT,' || CHR(10) ||
+          '         ' || q(r.ACTIVE)         || ' AS ACTIVE,' || CHR(10) ||
+          '         ' || q(r.DATASET)        || ' AS DATASET,' || CHR(10) ||
+          '         ' || q_ts(r.CREATED_AT)  || ' AS CREATED_AT,' || CHR(10) ||
+          '         ' || q(r.ENVIRONMENT)    || ' AS ENVIRONMENT' || CHR(10) ||
+          '  FROM dual' || CHR(10) ||
+          ') s' || CHR(10) ||
+          'ON (t.ID = s.ID)' || CHR(10) ||
+          'WHEN MATCHED THEN UPDATE SET' || CHR(10) ||
+          '  t.COMPONENT_TYPE = s.COMPONENT_TYPE,' || CHR(10) ||
+          '  t.CONTENT        = s.CONTENT,' || CHR(10) ||
+          '  t.ACTIVE         = s.ACTIVE,' || CHR(10) ||
+          '  t.DATASET        = s.DATASET,' || CHR(10) ||
+          '  t.CREATED_AT     = s.CREATED_AT,' || CHR(10) ||
+          '  t.ENVIRONMENT    = s.ENVIRONMENT' || CHR(10) ||
+          'WHEN NOT MATCHED THEN INSERT (' || CHR(10) ||
+          '  ID, COMPONENT_TYPE, CONTENT, ACTIVE, DATASET, CREATED_AT, ENVIRONMENT' || CHR(10) ||
+          ') VALUES (' || CHR(10) ||
+          '  s.ID, s.COMPONENT_TYPE, s.CONTENT, s.ACTIVE, s.DATASET, s.CREATED_AT, s.ENVIRONMENT' || CHR(10) ||
+          ');' || CHR(10) || CHR(10)
+      );
+    END LOOP;
 
-    --------------------------------------------------------------------------
+    ------------------------------------------------------------------------
+    -- 2) CHATBOT_PARAMETER_COMPONENT  (note: table name is singular)
+    ------------------------------------------------------------------------
+    DBMS_LOB.APPEND(l_out, '/* CHATBOT_PARAMETER_COMPONENT */' || CHR(10) || CHR(10));
+
+    FOR r IN (
+      SELECT ID,
+             COMPONENT_TYPE
+        FROM CHATBOT_PARAMETER_COMPONENT
+       ORDER BY ID
+    ) LOOP
+      DBMS_LOB.APPEND(
+        l_out,
+          'MERGE INTO ' || LOWER(l_schema) || '.CHATBOT_PARAMETER_COMPONENT t' || CHR(10) ||
+          'USING (' || CHR(10) ||
+          '  SELECT ' || r.ID                   || ' AS ID,' || CHR(10) ||
+          '         ' || q(r.COMPONENT_TYPE)    || ' AS COMPONENT_TYPE' || CHR(10) ||
+          '  FROM dual' || CHR(10) ||
+          ') s' || CHR(10) ||
+          'ON (t.ID = s.ID)' || CHR(10) ||
+          'WHEN MATCHED THEN UPDATE SET' || CHR(10) ||
+          '  t.COMPONENT_TYPE = s.COMPONENT_TYPE' || CHR(10) ||
+          'WHEN NOT MATCHED THEN INSERT (' || CHR(10) ||
+          '  ID, COMPONENT_TYPE' || CHR(10) ||
+          ') VALUES (' || CHR(10) ||
+          '  s.ID, s.COMPONENT_TYPE' || CHR(10) ||
+          ');' || CHR(10) || CHR(10)
+      );
+    END LOOP;
+
+    ------------------------------------------------------------------------
     -- 3) CHATBOT_GLOSSARY_RULES
-    --------------------------------------------------------------------------
-    DBMS_LOB.APPEND(l_out,
-      '/* CHATBOT_GLOSSARY_RULES */' || CHR(10) ||
-      '/* TODO: adjust column list / keys to your actual structure. */' || CHR(10) ||
-      '/* Example MERGE (replace cols and key as needed): */' || CHR(10) ||
-      '/*' || CHR(10) ||
-      'MERGE INTO ' || LOWER(l_schema) || '.CHATBOT_GLOSSARY_RULES t' || CHR(10) ||
-      'USING (' || CHR(10) ||
-      '  SELECT :RULE_ID        AS RULE_ID,' || CHR(10) ||
-      '         :DATASET_ID     AS DATASET_ID,' || CHR(10) ||
-      '         :TARGET_TABLE   AS TARGET_TABLE,' || CHR(10) ||
-      '         :TARGET_COLUMN  AS TARGET_COLUMN,' || CHR(10) ||
-      '         :TARGET_ROLE    AS TARGET_ROLE,' || CHR(10) ||
-      '         :FILTER_JSON    AS FILTER_JSON' || CHR(10) ||
-      '  FROM dual' || CHR(10) ||
-      ') s' || CHR(10) ||
-      'ON (t.RULE_ID = s.RULE_ID)' || CHR(10) ||
-      'WHEN MATCHED THEN UPDATE SET' || CHR(10) ||
-      '  t.DATASET_ID    = s.DATASET_ID,' || CHR(10) ||
-      '  t.TARGET_TABLE  = s.TARGET_TABLE,' || CHR(10) ||
-      '  t.TARGET_COLUMN = s.TARGET_COLUMN,' || CHR(10) ||
-      '  t.TARGET_ROLE   = s.TARGET_ROLE,' || CHR(10) ||
-      '  t.FILTER_JSON   = s.FILTER_JSON' || CHR(10) ||
-      'WHEN NOT MATCHED THEN INSERT (' || CHR(10) ||
-      '  RULE_ID, DATASET_ID, TARGET_TABLE, TARGET_COLUMN, TARGET_ROLE, FILTER_JSON' || CHR(10) ||
-      ') VALUES (' || CHR(10) ||
-      '  s.RULE_ID, s.DATASET_ID, s.TARGET_TABLE, s.TARGET_COLUMN, s.TARGET_ROLE, s.FILTER_JSON' || CHR(10) ||
-      ');' || CHR(10) ||
-      '*/' || CHR(10) || CHR(10)
-    );
+    ------------------------------------------------------------------------
+    DBMS_LOB.APPEND(l_out, '/* CHATBOT_GLOSSARY_RULES */' || CHR(10) || CHR(10));
 
-    --------------------------------------------------------------------------
+    FOR r IN (
+      SELECT ID,
+             DATASET,
+             ENVIRONMENT,
+             ACTIVE,
+             MATCH_MODE,
+             ROLE,
+             PRIORITY,
+             DESCRIPTION,
+             TARGET_TABLE,
+             TARGET_COLUMN,
+             TARGET_ROLE,
+             TARGET_FILTER,
+             FILTER_RULE,
+             CREATED_AT,
+             CREATED_BY,
+             UPDATED_AT,
+             UPDATED_BY
+        FROM CHATBOT_GLOSSARY_RULES
+       ORDER BY ID
+    ) LOOP
+      DBMS_LOB.APPEND(
+        l_out,
+          'MERGE INTO ' || LOWER(l_schema) || '.CHATBOT_GLOSSARY_RULES t' || CHR(10) ||
+          'USING (' || CHR(10) ||
+          '  SELECT ' || r.ID                   || ' AS ID,' || CHR(10) ||
+          '         ' || q(r.DATASET)           || ' AS DATASET,' || CHR(10) ||
+          '         ' || q(r.ENVIRONMENT)       || ' AS ENVIRONMENT,' || CHR(10) ||
+          '         ' || q(r.ACTIVE)            || ' AS ACTIVE,' || CHR(10) ||
+          '         ' || q(r.MATCH_MODE)        || ' AS MATCH_MODE,' || CHR(10) ||
+          '         ' || q(r.ROLE)              || ' AS ROLE,' || CHR(10) ||
+          '         ' || NVL(TO_CHAR(r.PRIORITY),'NULL') || ' AS PRIORITY,' || CHR(10) ||
+          '         ' || q(r.DESCRIPTION)       || ' AS DESCRIPTION,' || CHR(10) ||
+          '         ' || q(r.TARGET_TABLE)      || ' AS TARGET_TABLE,' || CHR(10) ||
+          '         ' || q(r.TARGET_COLUMN)     || ' AS TARGET_COLUMN,' || CHR(10) ||
+          '         ' || q(r.TARGET_ROLE)       || ' AS TARGET_ROLE,' || CHR(10) ||
+          '         ' || q_clob(r.TARGET_FILTER)|| ' AS TARGET_FILTER,' || CHR(10) ||
+          '         ' || q_clob(r.FILTER_RULE)  || ' AS FILTER_RULE,' || CHR(10) ||
+          '         ' || q_ts(r.CREATED_AT)     || ' AS CREATED_AT,' || CHR(10) ||
+          '         ' || q(r.CREATED_BY)        || ' AS CREATED_BY,' || CHR(10) ||
+          '         ' || q_ts(r.UPDATED_AT)     || ' AS UPDATED_AT,' || CHR(10) ||
+          '         ' || q(r.UPDATED_BY)        || ' AS UPDATED_BY' || CHR(10) ||
+          '  FROM dual' || CHR(10) ||
+          ') s' || CHR(10) ||
+          'ON (t.ID = s.ID)' || CHR(10) ||
+          'WHEN MATCHED THEN UPDATE SET' || CHR(10) ||
+          '  t.DATASET      = s.DATASET,' || CHR(10) ||
+          '  t.ENVIRONMENT  = s.ENVIRONMENT,' || CHR(10) ||
+          '  t.ACTIVE       = s.ACTIVE,' || CHR(10) ||
+          '  t.MATCH_MODE   = s.MATCH_MODE,' || CHR(10) ||
+          '  t.ROLE         = s.ROLE,' || CHR(10) ||
+          '  t.PRIORITY     = s.PRIORITY,' || CHR(10) ||
+          '  t.DESCRIPTION  = s.DESCRIPTION,' || CHR(10) ||
+          '  t.TARGET_TABLE = s.TARGET_TABLE,' || CHR(10) ||
+          '  t.TARGET_COLUMN= s.TARGET_COLUMN,' || CHR(10) ||
+          '  t.TARGET_ROLE  = s.TARGET_ROLE,' || CHR(10) ||
+          '  t.TARGET_FILTER= s.TARGET_FILTER,' || CHR(10) ||
+          '  t.FILTER_RULE  = s.FILTER_RULE,' || CHR(10) ||
+          '  t.CREATED_AT   = s.CREATED_AT,' || CHR(10) ||
+          '  t.CREATED_BY   = s.CREATED_BY,' || CHR(10) ||
+          '  t.UPDATED_AT   = s.UPDATED_AT,' || CHR(10) ||
+          '  t.UPDATED_BY   = s.UPDATED_BY' || CHR(10) ||
+          'WHEN NOT MATCHED THEN INSERT (' || CHR(10) ||
+          '  ID, DATASET, ENVIRONMENT, ACTIVE, MATCH_MODE, ROLE, PRIORITY, DESCRIPTION,' || CHR(10) ||
+          '  TARGET_TABLE, TARGET_COLUMN, TARGET_ROLE, TARGET_FILTER, FILTER_RULE,' || CHR(10) ||
+          '  CREATED_AT, CREATED_BY, UPDATED_AT, UPDATED_BY' || CHR(10) ||
+          ') VALUES (' || CHR(10) ||
+          '  s.ID, s.DATASET, s.ENVIRONMENT, s.ACTIVE, s.MATCH_MODE, s.ROLE, s.PRIORITY, s.DESCRIPTION,' || CHR(10) ||
+          '  s.TARGET_TABLE, s.TARGET_COLUMN, s.TARGET_ROLE, s.TARGET_FILTER, s.FILTER_RULE,' || CHR(10) ||
+          '  s.CREATED_AT, s.CREATED_BY, s.UPDATED_AT, s.UPDATED_BY' || CHR(10) ||
+          ');' || CHR(10) || CHR(10)
+      );
+    END LOOP;
+
+    ------------------------------------------------------------------------
     -- 4) CHATBOT_GLOSSARY_KEYWORDS
-    --------------------------------------------------------------------------
-    DBMS_LOB.APPEND(l_out,
-      '/* CHATBOT_GLOSSARY_KEYWORDS */' || CHR(10) ||
-      '/* TODO: adjust column list / keys to your actual structure. */' || CHR(10) ||
-      '/* Example MERGE (replace cols and key as needed): */' || CHR(10) ||
-      '/*' || CHR(10) ||
-      'MERGE INTO ' || LOWER(l_schema) || '.CHATBOT_GLOSSARY_KEYWORDS t' || CHR(10) ||
-      'USING (' || CHR(10) ||
-      '  SELECT :KEYWORD_ID  AS KEYWORD_ID,' || CHR(10) ||
-      '         :RULE_ID     AS RULE_ID,' || CHR(10) ||
-      '         :KEYWORD     AS KEYWORD,' || CHR(10) ||
-      '         :MATCH_MODE  AS MATCH_MODE' || CHR(10) ||
-      '  FROM dual' || CHR(10) ||
-      ') s' || CHR(10) ||
-      'ON (t.KEYWORD_ID = s.KEYWORD_ID)' || CHR(10) ||
-      'WHEN MATCHED THEN UPDATE SET' || CHR(10) ||
-      '  t.RULE_ID    = s.RULE_ID,' || CHR(10) ||
-      '  t.KEYWORD    = s.KEYWORD,' || CHR(10) ||
-      '  t.MATCH_MODE = s.MATCH_MODE' || CHR(10) ||
-      'WHEN NOT MATCHED THEN INSERT (' || CHR(10) ||
-      '  KEYWORD_ID, RULE_ID, KEYWORD, MATCH_MODE' || CHR(10) ||
-      ') VALUES (' || CHR(10) ||
-      '  s.KEYWORD_ID, s.RULE_ID, s.KEYWORD, s.MATCH_MODE' || CHR(10) ||
-      ');' || CHR(10) ||
-      '*/' || CHR(10) || CHR(10)
-    );
+    ------------------------------------------------------------------------
+    DBMS_LOB.APPEND(l_out, '/* CHATBOT_GLOSSARY_KEYWORDS */' || CHR(10) || CHR(10));
+
+    FOR r IN (
+      SELECT RULE_ID,
+             ORD,
+             KEYWORD
+        FROM CHATBOT_GLOSSARY_KEYWORDS
+       ORDER BY RULE_ID, ORD
+    ) LOOP
+      DBMS_LOB.APPEND(
+        l_out,
+          'MERGE INTO ' || LOWER(l_schema) || '.CHATBOT_GLOSSARY_KEYWORDS t' || CHR(10) ||
+          'USING (' || CHR(10) ||
+          '  SELECT ' || r.RULE_ID || ' AS RULE_ID,' || CHR(10) ||
+          '         ' || r.ORD     || ' AS ORD,' || CHR(10) ||
+          '         ' || q(r.KEYWORD) || ' AS KEYWORD' || CHR(10) ||
+          '  FROM dual' || CHR(10) ||
+          ') s' || CHR(10) ||
+          'ON (t.RULE_ID = s.RULE_ID AND t.ORD = s.ORD)' || CHR(10) ||
+          'WHEN MATCHED THEN UPDATE SET' || CHR(10) ||
+          '  t.KEYWORD = s.KEYWORD' || CHR(10) ||
+          'WHEN NOT MATCHED THEN INSERT (' || CHR(10) ||
+          '  RULE_ID, ORD, KEYWORD' || CHR(10) ||
+          ') VALUES (' || CHR(10) ||
+          '  s.RULE_ID, s.ORD, s.KEYWORD' || CHR(10) ||
+          ');' || CHR(10) || CHR(10)
+      );
+    END LOOP;
 
     RETURN l_out;
   END;
