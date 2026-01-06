@@ -11,14 +11,11 @@ CREATE OR REPLACE PACKAGE deploy_mgr_pkg AS
     p_dry_run           IN BOOLEAN DEFAULT FALSE
   );
 
-  -- Import a bundle ZIP directly from a GitHub URL.
-  -- The ZIP is expected to contain a manifest.json like the one created by export_bundle.
-  FUNCTION import_bundle_from_url(
-    p_zip_url IN VARCHAR2
-  ) RETURN NUMBER;
-
-  PROCEDURE self_update_from_url(
-    p_sql_url IN VARCHAR2
+  -- Execute an arbitrary SQL/PLSQL script (CLOB) under deploy logging.
+  PROCEDURE exec_script_clob(
+    p_script      IN CLOB,
+    p_script_name IN VARCHAR2,
+    p_dry_run     IN BOOLEAN DEFAULT FALSE
   );
 
   FUNCTION get_latest_bundle_id(p_app_id IN NUMBER) RETURN NUMBER;
@@ -45,16 +42,6 @@ END deploy_mgr_pkg;
 /
 
 create or replace PACKAGE BODY deploy_mgr_pkg AS
-
-  ------------------------------------------------------------------------------
-  -- Forward declaration for internal script runner
-  ------------------------------------------------------------------------------
-  PROCEDURE run_sql_script(
-    p_run_id      IN NUMBER,
-    p_script      IN CLOB,
-    p_script_name IN VARCHAR2,
-    p_dry_run     IN BOOLEAN DEFAULT FALSE
-  );
 
   ------------------------------------------------------------------------------
   -- Logging helpers
@@ -933,189 +920,6 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
       RAISE;
   END;
 
-  -- Import zip from github
-  FUNCTION import_bundle_from_url(
-    p_zip_url IN VARCHAR2
-  ) RETURN NUMBER IS
-    l_run_id      NUMBER;
-    l_zip         BLOB;
-    l_files       apex_zip.t_files;
-    l_manifest    CLOB;
-    l_manifest_b  BLOB;
-    l_app_id      NUMBER;
-    l_version_tag VARCHAR2(64);
-    l_bundle_id   NUMBER;
-  BEGIN
-    -- Start logging
-    l_run_id := run_start('IMPORT_URL');
-    run_log(l_run_id, 'Import bundle from URL: ' || p_zip_url);
-
-    -- Download ZIP from GitHub (or any HTTPS endpoint)
-    l_zip := apex_web_service.make_rest_request_b(
-              p_url         => p_zip_url,
-              p_http_method => 'GET'
-            );
-
-    IF l_zip IS NULL THEN
-      RAISE_APPLICATION_ERROR(-20050, 'Downloaded bundle BLOB is empty for URL: ' || p_zip_url);
-    END IF;
-
-    -- Locate manifest.json inside the ZIP
-    l_files := apex_zip.get_files(
-                p_zipped_blob => l_zip,
-                p_only_files  => TRUE
-              );
-
-    FOR i IN 1 .. l_files.COUNT LOOP
-      IF LOWER(l_files(i)) = 'manifest.json' THEN
-        l_manifest_b := apex_zip.get_file_content(
-                          p_zipped_blob => l_zip,
-                          p_file_name   => l_files(i)
-                        );
-        l_manifest := blob_to_clob(l_manifest_b);
-        EXIT;
-      END IF;
-    END LOOP;
-
-    IF l_manifest IS NULL THEN
-      RAISE_APPLICATION_ERROR(
-        -20051,
-        'manifest.json not found in ZIP downloaded from URL: ' || p_zip_url
-      );
-    END IF;
-
-    -- Extract app_id and version from manifest.json
-    BEGIN
-      SELECT
-        JSON_VALUE(l_manifest, '$.app_id'   RETURNING NUMBER),
-        JSON_VALUE(l_manifest, '$.version'  RETURNING VARCHAR2(64))
-      INTO
-        l_app_id,
-        l_version_tag
-      FROM dual;
-    EXCEPTION
-      WHEN OTHERS THEN
-        run_log(l_run_id, 'Failed to parse manifest.json; app_id/version will be NULL. Error: ' ||
-                          DBMS_UTILITY.FORMAT_ERROR_STACK);
-        l_app_id      := NULL;
-        l_version_tag := NULL;
-    END;
-
-    -- Store in DEPLOY_BUNDLES, same structure as export_bundle
-    -- Optional: SHA256 fingerprint for traceability
-    DECLARE
-      l_sha256 VARCHAR2(64);
-    BEGIN
-      l_sha256 := LOWER(
-                    RAWTOHEX(
-                      dbms_crypto.hash(
-                        src => l_zip,
-                        typ => dbms_crypto.hash_sh256
-                      )
-                    )
-                  );
-
-      INSERT INTO deploy_bundles (
-        app_id,
-        version_tag,
-        manifest_json,
-        bundle_zip,
-        sha256
-      )
-      VALUES (
-        l_app_id,
-        l_version_tag,
-        l_manifest,
-        l_zip,
-        l_sha256
-      )
-      RETURNING bundle_id INTO l_bundle_id;
-
-      run_log(
-        l_run_id,
-        'Bundle imported from URL. app_id=' || NVL(TO_CHAR(l_app_id),'NULL') ||
-        ' version=' || NVL(l_version_tag,'NULL') ||
-        ' bundle_id=' || l_bundle_id ||
-        ' sha256=' || l_sha256
-      );
-    END;
-
-    run_log(
-      l_run_id,
-      'Bundle imported from URL. app_id=' || NVL(TO_CHAR(l_app_id),'NULL') ||
-      ' version=' || NVL(l_version_tag,'NULL') ||
-      ' bundle_id=' || l_bundle_id
-    );
-
-    run_ok(l_run_id);
-    COMMIT;
-
-    RETURN l_bundle_id;
-
-  EXCEPTION
-    WHEN OTHERS THEN
-      IF l_run_id IS NOT NULL THEN
-        run_fail(
-          l_run_id,
-          DBMS_UTILITY.FORMAT_ERROR_STACK || CHR(10) ||
-          DBMS_UTILITY.FORMAT_ERROR_BACKTRACE
-        );
-        COMMIT;
-      END IF;
-      RAISE;
-  END import_bundle_from_url;
-
-  -- Self-update: download SQL from URL and execute via run_sql_script
-  PROCEDURE self_update_from_url(
-    p_sql_url IN VARCHAR2
-  ) IS
-    l_run_id   NUMBER;
-    l_sql_clob CLOB;
-  BEGIN
-    l_run_id := run_start('SELF_UPDATE');
-    run_log(l_run_id, 'Self-update from URL: ' || p_sql_url);
-
-    -- Download SQL script as CLOB
-    l_sql_clob := apex_web_service.make_rest_request(
-                    p_url         => p_sql_url,
-                    p_http_method => 'GET'
-                  );
-
-    IF l_sql_clob IS NULL OR DBMS_LOB.getlength(l_sql_clob) = 0 THEN
-      RAISE_APPLICATION_ERROR(
-        -20060,
-        'Downloaded SQL script is empty for URL: ' || p_sql_url
-      );
-    END IF;
-
-    -- Execute the script; it must contain CREATE OR REPLACE PACKAGE BODY deploy_mgr_pkg ...
-    -- run_sql_script already handles ";" and "/" terminators, comments, etc.
-    run_sql_script(
-      p_run_id      => l_run_id,
-      p_script      => l_sql_clob,
-      p_script_name => 'self_update_from_url',
-      p_dry_run     => FALSE
-    );
-
-    run_log(l_run_id, 'Self-update script executed.');
-
-    -- After this call, DEPLOY_MGR_PKG body may be recompiled; subsequent
-    -- references from this session may see ORA-04068 once, which is expected.
-    run_ok(l_run_id);
-    COMMIT;
-  EXCEPTION
-    WHEN OTHERS THEN
-      IF l_run_id IS NOT NULL THEN
-        run_fail(
-          l_run_id,
-          DBMS_UTILITY.FORMAT_ERROR_STACK || CHR(10) ||
-          DBMS_UTILITY.FORMAT_ERROR_BACKTRACE
-        );
-        COMMIT;
-      END IF;
-      RAISE;
-  END self_update_from_url;
-
   ------------------------------------------------------------------------------
   -- Script runner: executes a SQL/PLSQL script text containing:
   --   - SQL statements ending with ;
@@ -1287,6 +1091,43 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
     END IF;
 
   END run_sql_script;
+
+  ------------------------------------------------------------------------------
+  -- Public wrapper: execute a CLOB script under deploy logging
+  -- Intended for APEX uploads (manual SQL, e.g. deploy_mgr_pkg updates).
+  ------------------------------------------------------------------------------
+  PROCEDURE exec_script_clob(
+    p_script      IN CLOB,
+    p_script_name IN VARCHAR2,
+    p_dry_run     IN BOOLEAN DEFAULT FALSE
+  ) IS
+    l_run_id NUMBER;
+  BEGIN
+    l_run_id := run_start('MANUAL_SQL');
+    run_log(l_run_id,
+      'Manual exec_script_clob: '||p_script_name||
+      ' dry_run='||CASE WHEN p_dry_run THEN 'Y' ELSE 'N' END
+    );
+
+    run_sql_script(
+      p_run_id      => l_run_id,
+      p_script      => p_script,
+      p_script_name => p_script_name,
+      p_dry_run     => p_dry_run
+    );
+
+    run_ok(l_run_id);
+    COMMIT;
+  EXCEPTION
+    WHEN OTHERS THEN
+      run_fail(
+        l_run_id,
+        DBMS_UTILITY.FORMAT_ERROR_STACK||CHR(10)||
+        DBMS_UTILITY.FORMAT_ERROR_BACKTRACE
+      );
+      COMMIT;
+      RAISE;
+  END exec_script_clob;
 
   ------------------------------------------------------------------------------
 
