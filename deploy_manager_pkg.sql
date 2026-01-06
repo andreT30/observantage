@@ -236,15 +236,21 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
   -- Job export (basic; secrets/credentials are NOT exported)
   ------------------------------------------------------------------------------
   FUNCTION export_jobs RETURN CLOB IS
-    l_out CLOB := EMPTY_CLOB();
-    l_action   VARCHAR2(32767);
-    l_repeat   VARCHAR2(32767);
+    l_out     CLOB := EMPTY_CLOB();
+    l_action  VARCHAR2(32767);
+    l_repeat  VARCHAR2(32767);
   BEGIN
     DBMS_LOB.CREATETEMPORARY(l_out, TRUE);
 
-    DBMS_LOB.APPEND(l_out,
-      '/* Scheduler jobs exported as CREATE/DROP blocks.'||CHR(10)||
-      '   NOTE: Credentials/secrets are NOT exported. Ensure required credentials exist per environment. */'||CHR(10)||CHR(10)
+    DBMS_LOB.APPEND(
+      l_out,
+        '/* Scheduler jobs exported as CREATE_JOB blocks.'||CHR(10)||
+        '   NOTE: Credentials/secrets are NOT exported. Ensure required credentials exist per environment.'||CHR(10)||
+        '   Enabled/disabled logic:'||CHR(10)||
+        '   - If job exists on target and source is ENABLED: keep target enabled state.'||CHR(10)||
+        '   - If source is DISABLED: force job disabled on target.'||CHR(10)||
+        '   - If job does not exist on target: new job follows source enabled flag.'||CHR(10)||
+        '*/'||CHR(10)||CHR(10)
     );
 
     FOR j IN (
@@ -256,38 +262,63 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
       IF j.job_type IN ('PLSQL_BLOCK','STORED_PROCEDURE') THEN
 
         -- Escape the chosen q-quote delimiter (~). If it appears, double it.
-        l_action := REPLACE(NVL(j.job_action,''), '~', '~~');
-        l_repeat := REPLACE(NVL(j.repeat_interval,''), '~', '~~');
+        l_action := REPLACE(NVL(j.job_action, ''), '~', '~~');
+        l_repeat := REPLACE(NVL(j.repeat_interval, ''), '~', '~~');
 
-        DBMS_LOB.APPEND(l_out,
-          'BEGIN'||CHR(10)||
-          '  BEGIN DBMS_SCHEDULER.DROP_JOB(job_name => '''||j.job_name||''', force => TRUE); EXCEPTION WHEN OTHERS THEN NULL; END;'||CHR(10)||
-          '  DBMS_SCHEDULER.CREATE_JOB('||CHR(10)||
-          '    job_name        => '''||j.job_name||''','||CHR(10)||
-          '    job_type        => '''||j.job_type||''','||CHR(10)||
-          '    job_action      => q''~'||l_action||'~'','||CHR(10)||
-          CASE
-            WHEN j.repeat_interval IS NOT NULL THEN
-              '    repeat_interval => q''~'||l_repeat||'~'','||CHR(10)
-            ELSE
-              ''
-          END ||
-          CASE
-            WHEN j.start_date IS NOT NULL THEN
-              '    start_date      => TO_TIMESTAMP_TZ('''||
-              TO_CHAR(j.start_date,'YYYY-MM-DD"T"HH24:MI:SS.FF TZH:TZM')||
-              ''',''YYYY-MM-DD"T"HH24:MI:SS.FF TZH:TZM''),'||CHR(10)
-            ELSE
-              ''
-          END ||
-          '    enabled         => FALSE'||CHR(10)||
-          '  );'||CHR(10)||
-          'END;'||CHR(10)||'/'||CHR(10)||CHR(10)
+        DBMS_LOB.APPEND(
+          l_out,
+            'DECLARE' || CHR(10) ||
+            '  l_target_enabled  VARCHAR2(5);' || CHR(10) ||
+            'BEGIN' || CHR(10) ||
+            '  BEGIN' || CHR(10) ||
+            '    SELECT enabled' || CHR(10) ||
+            '      INTO l_target_enabled' || CHR(10) ||
+            '      FROM user_scheduler_jobs' || CHR(10) ||
+            '     WHERE job_name = ''' || j.job_name || '''' || CHR(10) ||
+            '       AND owner     = SYS_CONTEXT(''USERENV'',''CURRENT_SCHEMA'');' || CHR(10) ||
+            '  EXCEPTION' || CHR(10) ||
+            '    WHEN NO_DATA_FOUND THEN' || CHR(10) ||
+            '      l_target_enabled := NULL;' || CHR(10) ||
+            '  END;' || CHR(10) ||
+            CHR(10) ||
+            '  IF l_target_enabled IS NULL THEN' || CHR(10) ||
+            '    -- Job does not exist on target: follow source enabled flag' || CHR(10) ||
+            '    l_target_enabled := ''' || CASE WHEN j.enabled = 'TRUE' THEN 'TRUE' ELSE 'FALSE' END || ''';' || CHR(10) ||
+            '  ELSIF ''' || j.enabled || ''' = ''FALSE'' THEN' || CHR(10) ||
+            '    -- Job disabled on source: force disabled on target' || CHR(10) ||
+            '    l_target_enabled := ''FALSE'';' || CHR(10) ||
+            '  END IF;' || CHR(10) ||
+            CHR(10) ||
+            '  DBMS_SCHEDULER.CREATE_JOB(' || CHR(10) ||
+            '    job_name        => ''' || j.job_name || ''',' || CHR(10) ||
+            '    job_type        => ''' || j.job_type || ''',' || CHR(10) ||
+            '    job_action      => q''~' || l_action || '~'',' || CHR(10) ||
+            CASE
+              WHEN j.repeat_interval IS NOT NULL THEN
+                '    repeat_interval => q''~' || l_repeat || '~'',' || CHR(10)
+              ELSE
+                ''
+            END ||
+            CASE
+              WHEN j.start_date IS NOT NULL THEN
+                '    start_date      => TO_TIMESTAMP_TZ(''' ||
+                TO_CHAR(j.start_date, 'YYYY-MM-DD"T"HH24:MI:SS.FF TZH:TZM') ||
+                ''',''YYYY-MM-DD"T"HH24:MI:SS.FF TZH:TZM''),' || CHR(10)
+              ELSE
+                ''
+            END ||
+            '    enabled         => (NVL(l_target_enabled, ''FALSE'') = ''TRUE''),' || CHR(10) ||
+            '    auto_drop       => FALSE,' || CHR(10) ||
+            '    replace         => TRUE' || CHR(10) ||
+            '  );' || CHR(10) ||
+            'END;' || CHR(10) || '/' || CHR(10) || CHR(10)
         );
 
       ELSE
-        DBMS_LOB.APPEND(l_out,
-          '/* Job '||j.job_name||' job_type='||j.job_type||' not auto-exported. Recreate manually if needed. */'||CHR(10)||CHR(10)
+        DBMS_LOB.APPEND(
+          l_out,
+            '/* Job ' || j.job_name || ' job_type=' || j.job_type ||
+            ' not auto-exported. Recreate manually if needed. */' || CHR(10) || CHR(10)
         );
       END IF;
 
@@ -392,6 +423,147 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
         '/* No APP_CONFIG rows exported for configured keys. */' || CHR(10)
       );
     END IF;
+
+    RETURN l_out;
+  END;
+
+  ------------------------------------------------------------------------------
+  -- CHATBOT_* seed export (parameters, components, glossary rules/keywords)
+  ------------------------------------------------------------------------------
+  FUNCTION export_chatbot_seed RETURN CLOB IS
+    l_out       CLOB := EMPTY_CLOB();
+    l_schema    VARCHAR2(128);
+  BEGIN
+    DBMS_LOB.CREATETEMPORARY(l_out, TRUE);
+    SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') INTO l_schema FROM dual;
+
+    DBMS_LOB.APPEND(
+      l_out,
+        '/* Seed data for CHATBOT_* tables exported from source environment. */' || CHR(10) ||
+        '/* Adjust schema prefix (' || LOWER(l_schema) || ') if needed before running manually. */' || CHR(10) ||
+        CHR(10)
+    );
+
+    --------------------------------------------------------------------------
+    -- 1) CHATBOT_PARAMETERS
+    --    Adjust key and column list to your actual table definition.
+    --------------------------------------------------------------------------
+    DBMS_LOB.APPEND(l_out,
+      '/* CHATBOT_PARAMETERS */' || CHR(10) ||
+      '/* TODO: adjust column list / keys to your actual structure. */' || CHR(10) ||
+      '/* Example MERGE (replace cols and key as needed): */' || CHR(10) ||
+      '/*' || CHR(10) ||
+      'MERGE INTO ' || LOWER(l_schema) || '.CHATBOT_PARAMETERS t' || CHR(10) ||
+      'USING (' || CHR(10) ||
+      '  SELECT :PARAM_ID       AS PARAM_ID,' || CHR(10) ||
+      '         :DATASET_ID     AS DATASET_ID,' || CHR(10) ||
+      '         :PARAM_KEY      AS PARAM_KEY,' || CHR(10) ||
+      '         :PARAM_JSON     AS PARAM_JSON' || CHR(10) ||
+      '  FROM dual' || CHR(10) ||
+      ') s' || CHR(10) ||
+      'ON (t.PARAM_ID = s.PARAM_ID)' || CHR(10) ||
+      'WHEN MATCHED THEN UPDATE SET' || CHR(10) ||
+      '  t.DATASET_ID = s.DATASET_ID,' || CHR(10) ||
+      '  t.PARAM_KEY  = s.PARAM_KEY,' || CHR(10) ||
+      '  t.PARAM_JSON = s.PARAM_JSON' || CHR(10) ||
+      'WHEN NOT MATCHED THEN INSERT (' || CHR(10) ||
+      '  PARAM_ID, DATASET_ID, PARAM_KEY, PARAM_JSON' || CHR(10) ||
+      ') VALUES (' || CHR(10) ||
+      '  s.PARAM_ID, s.DATASET_ID, s.PARAM_KEY, s.PARAM_JSON' || CHR(10) ||
+      ');' || CHR(10) ||
+      '*/' || CHR(10) || CHR(10)
+    );
+
+    --------------------------------------------------------------------------
+    -- 2) CHATBOT_PARAMETER_COMPONENTS
+    --------------------------------------------------------------------------
+    DBMS_LOB.APPEND(l_out,
+      '/* CHATBOT_PARAMETER_COMPONENTS */' || CHR(10) ||
+      '/* TODO: adjust column list / keys to your actual structure. */' || CHR(10) ||
+      '/* Example MERGE (replace cols and key as needed): */' || CHR(10) ||
+      '/*' || CHR(10) ||
+      'MERGE INTO ' || LOWER(l_schema) || '.CHATBOT_PARAMETER_COMPONENTS t' || CHR(10) ||
+      'USING (' || CHR(10) ||
+      '  SELECT :COMPONENT_ID   AS COMPONENT_ID,' || CHR(10) ||
+      '         :PARAM_ID       AS PARAM_ID,' || CHR(10) ||
+      '         :COMPONENT_KEY  AS COMPONENT_KEY,' || CHR(10) ||
+      '         :COMPONENT_JSON AS COMPONENT_JSON' || CHR(10) ||
+      '  FROM dual' || CHR(10) ||
+      ') s' || CHR(10) ||
+      'ON (t.COMPONENT_ID = s.COMPONENT_ID)' || CHR(10) ||
+      'WHEN MATCHED THEN UPDATE SET' || CHR(10) ||
+      '  t.PARAM_ID       = s.PARAM_ID,' || CHR(10) ||
+      '  t.COMPONENT_KEY  = s.COMPONENT_KEY,' || CHR(10) ||
+      '  t.COMPONENT_JSON = s.COMPONENT_JSON' || CHR(10) ||
+      'WHEN NOT MATCHED THEN INSERT (' || CHR(10) ||
+      '  COMPONENT_ID, PARAM_ID, COMPONENT_KEY, COMPONENT_JSON' || CHR(10) ||
+      ') VALUES (' || CHR(10) ||
+      '  s.COMPONENT_ID, s.PARAM_ID, s.COMPONENT_KEY, s.COMPONENT_JSON' || CHR(10) ||
+      ');' || CHR(10) ||
+      '*/' || CHR(10) || CHR(10)
+    );
+
+    --------------------------------------------------------------------------
+    -- 3) CHATBOT_GLOSSARY_RULES
+    --------------------------------------------------------------------------
+    DBMS_LOB.APPEND(l_out,
+      '/* CHATBOT_GLOSSARY_RULES */' || CHR(10) ||
+      '/* TODO: adjust column list / keys to your actual structure. */' || CHR(10) ||
+      '/* Example MERGE (replace cols and key as needed): */' || CHR(10) ||
+      '/*' || CHR(10) ||
+      'MERGE INTO ' || LOWER(l_schema) || '.CHATBOT_GLOSSARY_RULES t' || CHR(10) ||
+      'USING (' || CHR(10) ||
+      '  SELECT :RULE_ID        AS RULE_ID,' || CHR(10) ||
+      '         :DATASET_ID     AS DATASET_ID,' || CHR(10) ||
+      '         :TARGET_TABLE   AS TARGET_TABLE,' || CHR(10) ||
+      '         :TARGET_COLUMN  AS TARGET_COLUMN,' || CHR(10) ||
+      '         :TARGET_ROLE    AS TARGET_ROLE,' || CHR(10) ||
+      '         :FILTER_JSON    AS FILTER_JSON' || CHR(10) ||
+      '  FROM dual' || CHR(10) ||
+      ') s' || CHR(10) ||
+      'ON (t.RULE_ID = s.RULE_ID)' || CHR(10) ||
+      'WHEN MATCHED THEN UPDATE SET' || CHR(10) ||
+      '  t.DATASET_ID    = s.DATASET_ID,' || CHR(10) ||
+      '  t.TARGET_TABLE  = s.TARGET_TABLE,' || CHR(10) ||
+      '  t.TARGET_COLUMN = s.TARGET_COLUMN,' || CHR(10) ||
+      '  t.TARGET_ROLE   = s.TARGET_ROLE,' || CHR(10) ||
+      '  t.FILTER_JSON   = s.FILTER_JSON' || CHR(10) ||
+      'WHEN NOT MATCHED THEN INSERT (' || CHR(10) ||
+      '  RULE_ID, DATASET_ID, TARGET_TABLE, TARGET_COLUMN, TARGET_ROLE, FILTER_JSON' || CHR(10) ||
+      ') VALUES (' || CHR(10) ||
+      '  s.RULE_ID, s.DATASET_ID, s.TARGET_TABLE, s.TARGET_COLUMN, s.TARGET_ROLE, s.FILTER_JSON' || CHR(10) ||
+      ');' || CHR(10) ||
+      '*/' || CHR(10) || CHR(10)
+    );
+
+    --------------------------------------------------------------------------
+    -- 4) CHATBOT_GLOSSARY_KEYWORDS
+    --------------------------------------------------------------------------
+    DBMS_LOB.APPEND(l_out,
+      '/* CHATBOT_GLOSSARY_KEYWORDS */' || CHR(10) ||
+      '/* TODO: adjust column list / keys to your actual structure. */' || CHR(10) ||
+      '/* Example MERGE (replace cols and key as needed): */' || CHR(10) ||
+      '/*' || CHR(10) ||
+      'MERGE INTO ' || LOWER(l_schema) || '.CHATBOT_GLOSSARY_KEYWORDS t' || CHR(10) ||
+      'USING (' || CHR(10) ||
+      '  SELECT :KEYWORD_ID  AS KEYWORD_ID,' || CHR(10) ||
+      '         :RULE_ID     AS RULE_ID,' || CHR(10) ||
+      '         :KEYWORD     AS KEYWORD,' || CHR(10) ||
+      '         :MATCH_MODE  AS MATCH_MODE' || CHR(10) ||
+      '  FROM dual' || CHR(10) ||
+      ') s' || CHR(10) ||
+      'ON (t.KEYWORD_ID = s.KEYWORD_ID)' || CHR(10) ||
+      'WHEN MATCHED THEN UPDATE SET' || CHR(10) ||
+      '  t.RULE_ID    = s.RULE_ID,' || CHR(10) ||
+      '  t.KEYWORD    = s.KEYWORD,' || CHR(10) ||
+      '  t.MATCH_MODE = s.MATCH_MODE' || CHR(10) ||
+      'WHEN NOT MATCHED THEN INSERT (' || CHR(10) ||
+      '  KEYWORD_ID, RULE_ID, KEYWORD, MATCH_MODE' || CHR(10) ||
+      ') VALUES (' || CHR(10) ||
+      '  s.KEYWORD_ID, s.RULE_ID, s.KEYWORD, s.MATCH_MODE' || CHR(10) ||
+      ');' || CHR(10) ||
+      '*/' || CHR(10) || CHR(10)
+    );
 
     RETURN l_out;
   END;
@@ -895,6 +1067,10 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
     l_tmp := export_app_config;
     APEX_ZIP.ADD_FILE(l_zip, 'db/ddl/95_app_config.sql', clob_to_blob(l_tmp));
 
+    -- CHATBOT_* seed (parameters, components, glossary rules/keywords)
+    l_tmp := export_chatbot_seed;
+    APEX_ZIP.ADD_FILE(l_zip, 'db/ddl/96_chatbot_seed.sql', clob_to_blob(l_tmp));
+
     -- Scheduler Jobs
     IF p_include_jobs THEN
       l_tmp := export_jobs;
@@ -1347,17 +1523,15 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
     -- Seed APP_CONFIG for selected keys
     run_script_from_zip(p_run_id, l_zip, 'db/ddl/95_app_config.sql', p_dry_run => p_dry_run);
 
+    -- Seed CHATBOT_* tables (parameters, components, glossary)
+    run_script_from_zip(p_run_id, l_zip, 'db/ddl/96_chatbot_seed.sql', p_dry_run => p_dry_run);
+
     IF NOT p_dry_run AND p_enable_jobs_after THEN
-      run_log(p_run_id, 'Enabling scheduler jobs (p_enable_jobs_after=TRUE)');
-      FOR j IN (SELECT job_name FROM user_scheduler_jobs) LOOP
-        BEGIN
-          DBMS_SCHEDULER.ENABLE(j.job_name);
-        EXCEPTION
-          WHEN OTHERS THEN
-            run_log(p_run_id, 'Failed to enable job '||j.job_name||': '||SQLERRM);
-        END;
-      END LOOP;
+      run_log(p_run_id,
+        'NOTE: p_enable_jobs_after=TRUE but global enable is now disabled; ' ||
+        'job enabled/disabled state is controlled per job by export_jobs.');
     END IF;
+
 
     IF NOT p_dry_run THEN
       --------------------------------------------------------------------
