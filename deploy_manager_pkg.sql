@@ -1481,6 +1481,7 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
 
     l_stmt       CLOB;
     l_in_plsql   BOOLEAN := FALSE;
+    l_in_block_comment BOOLEAN := FALSE;
 
     PROCEDURE stmt_reset IS
     BEGIN
@@ -1587,12 +1588,28 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
       -- Normalize
       l_line := REPLACE(l_line, CHR(13), '');
 
-      -- Skip empty or comment-only lines
+      -- Handle /* ... */ block comments correctly
+      IF l_in_block_comment THEN
+        stmt_append(l_line);
+        IF INSTR(l_line, '*/') > 0 THEN
+          l_in_block_comment := FALSE;
+        END IF;
+        CONTINUE;
+      END IF;
+
+      IF INSTR(l_line, '/*') > 0 AND INSTR(l_line, '*/') = 0 THEN
+        l_in_block_comment := TRUE;
+        stmt_append(l_line);
+        CONTINUE;
+      END IF;
+
+      -- Skip truly empty lines
       IF trim_line(l_line) IS NULL THEN
         CONTINUE;
       END IF;
 
-      IF REGEXP_LIKE(LTRIM(l_line), '^(--|/\*|\*/)$') THEN
+      -- Preserve single-line comments
+      IF REGEXP_LIKE(LTRIM(l_line), '^--') THEN
         stmt_append(l_line);
         CONTINUE;
       END IF;
