@@ -252,22 +252,29 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
 
   ------------------------------------------------------------------------------
   -- Job export (basic; secrets/credentials are NOT exported)
+  --  - If job does not exist on target: CREATE_JOB
+  --  - If job exists: SET_ATTRIBUTE / SET_ATTRIBUTE_NULL (no DROP)
+  --  - If job_type differs: raise (job_type is not safely mutable)
   ------------------------------------------------------------------------------
   FUNCTION export_jobs RETURN CLOB IS
     l_out     CLOB := EMPTY_CLOB();
     l_action  VARCHAR2(32767);
     l_repeat  VARCHAR2(32767);
+    l_comm    VARCHAR2(32767);
   BEGIN
     DBMS_LOB.CREATETEMPORARY(l_out, TRUE);
 
     DBMS_LOB.APPEND(
       l_out,
-        '/* Scheduler jobs exported as CREATE_JOB blocks.'||CHR(10)||
+        '/* Scheduler jobs exported as CREATE_JOB blocks (with UPDATE via SET_ATTRIBUTE).'||CHR(10)||
         '   NOTE: Credentials/secrets are NOT exported. Ensure required credentials exist per environment.'||CHR(10)||
         '   Enabled/disabled logic:'||CHR(10)||
         '   - If job exists on target and source is ENABLED: keep target enabled state.'||CHR(10)||
         '   - If source is DISABLED: force job disabled on target.'||CHR(10)||
         '   - If job does not exist on target: new job follows source enabled flag.'||CHR(10)||
+        '   Update logic:'||CHR(10)||
+        '   - If job exists and job_type differs: ERROR (job_type not updated automatically).'||CHR(10)||
+        '   - Else: disable job, update changed attributes, then enable/disable per policy.'||CHR(10)||
         '*/'||CHR(10)||CHR(10)
     );
 
@@ -279,25 +286,62 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
 
       IF j.job_type IN ('PLSQL_BLOCK','STORED_PROCEDURE') THEN
 
-        -- Escape the chosen q-quote delimiter (~). If it appears, double it.
+        -- Escape chosen q-quote delimiter (~). If it appears, double it.
         l_action := REPLACE(NVL(j.job_action, ''), '~', '~~');
         l_repeat := REPLACE(NVL(j.repeat_interval, ''), '~', '~~');
+        l_comm   := REPLACE(NVL(j.comments, ''), '~', '~~');
 
         DBMS_LOB.APPEND(
           l_out,
             'DECLARE' || CHR(10) ||
             '  l_target_enabled  VARCHAR2(5);' || CHR(10) ||
+            '  l_exists          NUMBER := 0;' || CHR(10) ||
+            CHR(10) ||
+            '  -- Current (target) attributes' || CHR(10) ||
+            '  l_job_type        VARCHAR2(30);' || CHR(10) ||
+            '  l_job_action      VARCHAR2(4000);' || CHR(10) ||
+            '  l_repeat_interval VARCHAR2(4000);' || CHR(10) ||
+            '  l_start_date      TIMESTAMP WITH TIME ZONE;' || CHR(10) ||
+            '  l_comments        VARCHAR2(4000);' || CHR(10) ||
+            CHR(10) ||
+            '  -- Desired (source) attributes' || CHR(10) ||
+            '  d_job_type        VARCHAR2(30)   := ''' || j.job_type || ''';' || CHR(10) ||
+            '  d_job_action      VARCHAR2(4000) := q''~' || l_action || '~'';' || CHR(10) ||
+            CASE
+              WHEN j.repeat_interval IS NOT NULL THEN
+                '  d_repeat_interval VARCHAR2(4000) := q''~' || l_repeat || '~'';' || CHR(10)
+              ELSE
+                '  d_repeat_interval VARCHAR2(4000) := NULL;' || CHR(10)
+            END ||
+            CASE
+              WHEN j.start_date IS NOT NULL THEN
+                '  d_start_date      TIMESTAMP WITH TIME ZONE := TO_TIMESTAMP_TZ(''' ||
+                TO_CHAR(j.start_date, 'YYYY-MM-DD"T"HH24:MI:SS.FF TZH:TZM') ||
+                ''',''YYYY-MM-DD"T"HH24:MI:SS.FF TZH:TZM'');' || CHR(10)
+              ELSE
+                '  d_start_date      TIMESTAMP WITH TIME ZONE := NULL;' || CHR(10)
+            END ||
+            CASE
+              WHEN j.comments IS NOT NULL THEN
+                '  d_comments        VARCHAR2(4000) := q''~' || l_comm || '~'';' || CHR(10)
+              ELSE
+                '  d_comments        VARCHAR2(4000) := NULL;' || CHR(10)
+            END ||
             'BEGIN' || CHR(10) ||
+            '  -- Detect existence + current enabled state' || CHR(10) ||
             '  BEGIN' || CHR(10) ||
             '    SELECT enabled' || CHR(10) ||
             '      INTO l_target_enabled' || CHR(10) ||
             '      FROM user_scheduler_jobs' || CHR(10) ||
             '     WHERE job_name = ''' || j.job_name || ''';' || CHR(10) ||
+            '    l_exists := 1;' || CHR(10) ||
             '  EXCEPTION' || CHR(10) ||
             '    WHEN NO_DATA_FOUND THEN' || CHR(10) ||
             '      l_target_enabled := NULL;' || CHR(10) ||
+            '      l_exists := 0;' || CHR(10) ||
             '  END;' || CHR(10) ||
             CHR(10) ||
+            '  -- Enabled/disabled policy' || CHR(10) ||
             '  IF l_target_enabled IS NULL THEN' || CHR(10) ||
             '    -- Job does not exist on target: follow source enabled flag' || CHR(10) ||
             '    l_target_enabled := ''' || CASE WHEN j.enabled = 'TRUE' THEN 'TRUE' ELSE 'FALSE' END || ''';' || CHR(10) ||
@@ -306,28 +350,119 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
             '    l_target_enabled := ''FALSE'';' || CHR(10) ||
             '  END IF;' || CHR(10) ||
             CHR(10) ||
-            '  DBMS_SCHEDULER.CREATE_JOB(' || CHR(10) ||
-            '    job_name        => ''' || j.job_name || ''',' || CHR(10) ||
-            '    job_type        => ''' || j.job_type || ''',' || CHR(10) ||
-            '    job_action      => q''~' || l_action || '~'',' || CHR(10) ||
+            '  IF l_exists = 1 THEN' || CHR(10) ||
+            '    -- Read current attributes' || CHR(10) ||
+            '    SELECT job_type, job_action, repeat_interval, start_date, comments' || CHR(10) ||
+            '      INTO l_job_type, l_job_action, l_repeat_interval, l_start_date, l_comments' || CHR(10) ||
+            '      FROM user_scheduler_jobs' || CHR(10) ||
+            '     WHERE job_name = ''' || j.job_name || ''';' || CHR(10) ||
+            CHR(10) ||
+            '    -- job_type cannot be safely updated via SET_ATTRIBUTE -> fail fast' || CHR(10) ||
+            '    IF NVL(l_job_type,''#'') <> NVL(d_job_type,''#'') THEN' || CHR(10) ||
+            '      raise_application_error(-20051,' || CHR(10) ||
+            '        ''Job ' || j.job_name || ' exists but job_type differs. target=''||l_job_type||'' source=''||d_job_type);' || CHR(10) ||
+            '    END IF;' || CHR(10) ||
+            CHR(10) ||
+            '    -- Disable while updating (safe even if already disabled)' || CHR(10) ||
+            '    DBMS_SCHEDULER.DISABLE(''' || j.job_name || ''', force => TRUE);' || CHR(10) ||
+            CHR(10) ||
+            '    -- job_action' || CHR(10) ||
+            '    IF NVL(l_job_action,''#'') <> NVL(d_job_action,''#'') THEN' || CHR(10) ||
+            '      DBMS_SCHEDULER.SET_ATTRIBUTE(' || CHR(10) ||
+            '        name      => ''' || j.job_name || ''',' || CHR(10) ||
+            '        attribute => ''job_action'',' || CHR(10) ||
+            '        value     => d_job_action' || CHR(10) ||
+            '      );' || CHR(10) ||
+            '    END IF;' || CHR(10) ||
+            CHR(10) ||
+            '    -- repeat_interval' || CHR(10) ||
+            '    IF d_repeat_interval IS NULL THEN' || CHR(10) ||
+            '      IF l_repeat_interval IS NOT NULL THEN' || CHR(10) ||
+            '        DBMS_SCHEDULER.SET_ATTRIBUTE_NULL(' || CHR(10) ||
+            '          name      => ''' || j.job_name || ''',' || CHR(10) ||
+            '          attribute => ''repeat_interval''' || CHR(10) ||
+            '        );' || CHR(10) ||
+            '      END IF;' || CHR(10) ||
+            '    ELSIF NVL(l_repeat_interval,''#'') <> NVL(d_repeat_interval,''#'') THEN' || CHR(10) ||
+            '      DBMS_SCHEDULER.SET_ATTRIBUTE(' || CHR(10) ||
+            '        name      => ''' || j.job_name || ''',' || CHR(10) ||
+            '        attribute => ''repeat_interval'',' || CHR(10) ||
+            '        value     => d_repeat_interval' || CHR(10) ||
+            '      );' || CHR(10) ||
+            '    END IF;' || CHR(10) ||
+            CHR(10) ||
+            '    -- start_date' || CHR(10) ||
+            '    IF d_start_date IS NULL THEN' || CHR(10) ||
+            '      IF l_start_date IS NOT NULL THEN' || CHR(10) ||
+            '        DBMS_SCHEDULER.SET_ATTRIBUTE_NULL(' || CHR(10) ||
+            '          name      => ''' || j.job_name || ''',' || CHR(10) ||
+            '          attribute => ''start_date''' || CHR(10) ||
+            '        );' || CHR(10) ||
+            '      END IF;' || CHR(10) ||
+            '    ELSIF l_start_date IS NULL OR l_start_date <> d_start_date THEN' || CHR(10) ||
+            '      DBMS_SCHEDULER.SET_ATTRIBUTE(' || CHR(10) ||
+            '        name      => ''' || j.job_name || ''',' || CHR(10) ||
+            '        attribute => ''start_date'',' || CHR(10) ||
+            '        value     => d_start_date' || CHR(10) ||
+            '      );' || CHR(10) ||
+            '    END IF;' || CHR(10) ||
+            CHR(10) ||
+            '    -- comments' || CHR(10) ||
+            '    IF d_comments IS NULL THEN' || CHR(10) ||
+            '      IF l_comments IS NOT NULL THEN' || CHR(10) ||
+            '        DBMS_SCHEDULER.SET_ATTRIBUTE_NULL(' || CHR(10) ||
+            '          name      => ''' || j.job_name || ''',' || CHR(10) ||
+            '          attribute => ''comments''' || CHR(10) ||
+            '        );' || CHR(10) ||
+            '      END IF;' || CHR(10) ||
+            '    ELSIF NVL(l_comments,''#'') <> NVL(d_comments,''#'') THEN' || CHR(10) ||
+            '      DBMS_SCHEDULER.SET_ATTRIBUTE(' || CHR(10) ||
+            '        name      => ''' || j.job_name || ''',' || CHR(10) ||
+            '        attribute => ''comments'',' || CHR(10) ||
+            '        value     => d_comments' || CHR(10) ||
+            '      );' || CHR(10) ||
+            '    END IF;' || CHR(10) ||
+            CHR(10) ||
+            '    -- auto_drop (you force FALSE everywhere)' || CHR(10) ||
+            '    DBMS_SCHEDULER.SET_ATTRIBUTE(' || CHR(10) ||
+            '      name      => ''' || j.job_name || ''',' || CHR(10) ||
+            '      attribute => ''auto_drop'',' || CHR(10) ||
+            '      value     => FALSE' || CHR(10) ||
+            '    );' || CHR(10) ||
+            CHR(10) ||
+            '    -- Enable/disable per policy' || CHR(10) ||
+            '    IF NVL(l_target_enabled, ''FALSE'') = ''TRUE'' THEN' || CHR(10) ||
+            '      DBMS_SCHEDULER.ENABLE(''' || j.job_name || ''');' || CHR(10) ||
+            '    END IF;' || CHR(10) ||
+            CHR(10) ||
+            '  ELSE' || CHR(10) ||
+            '    -- Create new job (no REPLACE parameter on this DB version)' || CHR(10) ||
+            '    DBMS_SCHEDULER.CREATE_JOB(' || CHR(10) ||
+            '      job_name        => ''' || j.job_name || ''',' || CHR(10) ||
+            '      job_type        => d_job_type,' || CHR(10) ||
+            '      job_action      => d_job_action,' || CHR(10) ||
             CASE
               WHEN j.repeat_interval IS NOT NULL THEN
-                '    repeat_interval => q''~' || l_repeat || '~'',' || CHR(10)
+                '      repeat_interval => d_repeat_interval,' || CHR(10)
               ELSE
                 ''
             END ||
             CASE
               WHEN j.start_date IS NOT NULL THEN
-                '    start_date      => TO_TIMESTAMP_TZ(''' ||
-                TO_CHAR(j.start_date, 'YYYY-MM-DD"T"HH24:MI:SS.FF TZH:TZM') ||
-                ''',''YYYY-MM-DD"T"HH24:MI:SS.FF TZH:TZM''),' || CHR(10)
+                '      start_date      => d_start_date,' || CHR(10)
               ELSE
                 ''
             END ||
-            '    enabled         => (NVL(l_target_enabled, ''FALSE'') = ''TRUE''),' || CHR(10) ||
-            '    auto_drop       => FALSE,' || CHR(10) ||
-            '    replace         => TRUE' || CHR(10) ||
-            '  );' || CHR(10) ||
+            '      enabled         => (NVL(l_target_enabled, ''FALSE'') = ''TRUE''),' || CHR(10) ||
+            '      auto_drop       => FALSE' || CHR(10) ||
+            CASE
+              WHEN j.comments IS NOT NULL THEN
+                '    ,'||'  comments        => d_comments' || CHR(10)
+              ELSE
+                ''
+            END ||
+            '    );' || CHR(10) ||
+            '  END IF;' || CHR(10) ||
             'END;' || CHR(10) || '/' || CHR(10) || CHR(10)
         );
 
