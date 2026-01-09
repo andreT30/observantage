@@ -26,12 +26,13 @@ The system is composed of:
 See [docs/architecture.md](docs/architecture.md) for details.
 
 ## Repository Structure
+```
 apex/
-f1200.sql # Oracle APEX application export (App 1200)
+f1200.sql     # Oracle APEX application export (App 1200)
 
 db/
-ddl/ # Tables, views, packages, jobs, indexes
-migrations/ # Bundle migration metadata
+ddl/          # Tables, views, packages, jobs, indexes
+migrations/   # Bundle migration metadata
 
 docs/
 architecture.md
@@ -40,6 +41,7 @@ configuration.md
 chatbot.md
 deployment.md
 troubleshooting.md
+```
 
 
 ## Deployment (Summary)

@@ -25,8 +25,30 @@ The process is repeatable and environment-agnostic.
 
 ### 1. Database Objects
 Execute all SQL under:
-apex/f1200.sql
+```db/ddl/```
 
+This creates:
+- tables
+- views
+- packages
+- jobs
+- indexes
+- constraints
+
+---
+
+### 2. Seed Data
+Execute:
+- configuration seed scripts
+- chatbot glossary seed scripts
+
+These create baseline metadata only.
+
+---
+
+### 3. Import APEX Application
+Import:
+```apex/f1200.sql```
 
 Using:
 - APEX App Builder
