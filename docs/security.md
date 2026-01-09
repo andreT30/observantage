@@ -24,6 +24,16 @@ Security is not an afterthought; it is part of the architecture.
 
 ---
 
+## Security Boundaries
+
+The diagram below illustrates where access control and auditability are enforced.
+
+![Security & Trust Boundaries](diagrams/security-boundaries.mmd)
+
+All access is mediated through database logic and logged.
+
+---
+
 ## Authentication
 
 ### How users authenticate

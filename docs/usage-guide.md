@@ -268,6 +268,19 @@ This is typically used by:
 
 ---
 
+## How Pages Work Together
+
+The following diagram shows how users typically move between pages.
+
+![APEX Page Interaction](diagrams/apex-pages.mmd)
+
+You can:
+- start from Home
+- drill down via reports
+- use the chatbot at any point for clarification
+
+---
+
 ## Common User Journeys
 
 ### “Why did cost increase?”

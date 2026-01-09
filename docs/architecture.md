@@ -13,6 +13,16 @@ The design emphasizes:
 - environment portability
 - traceability and logging
 
+## Architecture Diagram
+
+The following diagram shows the high-level system architecture and separation of concerns.
+
+![System Architecture](diagrams/architecture.mmd)
+
+- Oracle APEX provides the presentation layer
+- All business logic resides in the database
+- Configuration and chatbot behavior are data-driven
+
 ---
 
 ## 1. Presentation Layer (Oracle APEX)
@@ -119,4 +129,18 @@ Details: [chatbot.md](chatbot.md)
 - APEX pages remain read-only consumers
 - Failures are diagnosable via run IDs and logs
 - Deployment is repeatable via SQL + APEX import
+
+---
+
+## Cost Data Flow
+
+This diagram illustrates how OCI cost data flows from ingestion to dashboards.
+
+![Cost Data Flow](diagrams/cost-flow.mmd)
+
+Key points:
+- Data is refreshed via scheduled jobs
+- Aggregations and normalization occur centrally
+- Dashboards and chatbot read from the same facts
+
 

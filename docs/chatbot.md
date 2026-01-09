@@ -39,6 +39,19 @@ The chatbot is **metadata-driven**, explainable, and fully logged.
 
 ---
 
+## Chatbot Processing Pipeline
+
+The following diagram shows the deterministic NL2SQL pipeline used by the chatbot.
+
+![NL2SQL Pipeline](diagrams/chatbot-flow.mmd)
+
+This makes the chatbot:
+- explainable
+- auditable
+- safe by design
+
+---
+
 ## Core Components
 
 ### 1. Glossary Rules
@@ -96,6 +109,14 @@ Before execution:
 - execution context is logged
 
 Execution is performed entirely in the database.
+
+---
+
+## Chatbot Guardrails
+
+The pipeline enforces strict validation and logging before execution.
+
+![Security Boundaries](diagrams/security-boundaries.mmd)
 
 ---
 
