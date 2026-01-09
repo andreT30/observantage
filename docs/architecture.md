@@ -17,7 +17,41 @@ The design emphasizes:
 
 The following diagram shows the high-level system architecture and separation of concerns.
 
-[View System Architecture Diagram](diagrams/architecture.mmd)
+```mermaid
+flowchart TB
+  U[End Users] -->|Browser| APEX[Oracle APEX App]
+
+  subgraph Presentation
+    APEX --> P1[Dashboards & Reports]
+    APEX --> P2[Admin UI]
+    APEX --> P3[NL2SQL Chatbot UI]
+  end
+
+  subgraph Database
+    PL[PL/SQL Packages]
+    V[Views]
+    CFG[APP_CONFIG]
+    LOG[Logging Tables]
+    META[Chatbot Metadata]
+  end
+
+  APEX -->|SQL / AJAX| V
+  APEX -->|Procedures| PL
+
+  PL --> CFG
+  PL --> META
+  PL --> LOG
+
+  subgraph Data
+    COST[OCI Cost Usage]
+    RES[OCI Resources]
+    REL[Resource Relationships]
+  end
+
+  PL --> COST
+  PL --> RES
+  PL --> REL
+```
 
 - Oracle APEX provides the presentation layer
 - All business logic resides in the database
@@ -136,7 +170,20 @@ Details: [chatbot.md](chatbot.md)
 
 This diagram illustrates how OCI cost data flows from ingestion to dashboards.
 
-![Cost Data Flow](diagrams/cost-flow.mmd)
+```mermaid
+flowchart LR
+  OCI[OCI Cost & Usage Reports] --> J1[Scheduled Jobs]
+
+  J1 --> RAW[Raw / Staging Tables]
+  RAW --> AGG[Aggregation & Normalization]
+  AGG --> FACT[Cost Time-Series Tables]
+
+  FACT --> V[Analytics Views]
+  V --> APEX[Dashboards & Reports]
+
+  CFG[APP_CONFIG] --> J1
+  CFG --> AGG
+```
 
 Key points:
 - Data is refreshed via scheduled jobs

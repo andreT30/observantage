@@ -28,7 +28,25 @@ Security is not an afterthought; it is part of the architecture.
 
 The diagram below illustrates where access control and auditability are enforced.
 
-![Security & Trust Boundaries](diagrams/security-boundaries.mmd)
+```mermaid
+flowchart LR
+  USER[Authenticated User] --> APEX[APEX App]
+
+  APEX -->|Authorized| VIEW[Views]
+  APEX -->|Controlled| PKG[PL/SQL APIs]
+
+  PKG --> DATA[Cost & Resource Data]
+
+  subgraph Controls
+    AUTH[Auth Schemes]
+    CFG[APP_CONFIG]
+    LOG[Audit Logs]
+  end
+
+  AUTH --> APEX
+  CFG --> PKG
+  PKG --> LOG
+```
 
 All access is mediated through database logic and logged.
 

@@ -43,7 +43,29 @@ The chatbot is **metadata-driven**, explainable, and fully logged.
 
 The following diagram shows the deterministic NL2SQL pipeline used by the chatbot.
 
-![NL2SQL Pipeline](diagrams/chatbot-flow.mmd)
+```mermaid
+flowchart TD
+  Q[User Question] --> NORM[Normalize & Tokenize]
+
+  NORM --> ROUTER[Intent Router]
+
+  ROUTER --> GLOSS[Glossary Rules]
+  ROUTER --> META[Dataset Metadata]
+
+  GLOSS --> SQLGEN[SQL Generator]
+  META --> SQLGEN
+
+  SQLGEN --> VALID[Validate & Guardrails]
+  VALID --> EXEC[Execute SQL]
+
+  EXEC --> RES[Result Set]
+  RES --> SUM[Summarization]
+
+  SUM --> UI[Chatbot Response]
+
+  SQLGEN --> LOG[Execution Log]
+  EXEC --> LOG
+```
 
 This makes the chatbot:
 - explainable
@@ -116,7 +138,25 @@ Execution is performed entirely in the database.
 
 The pipeline enforces strict validation and logging before execution.
 
-![Security Boundaries](diagrams/security-boundaries.mmd)
+```mermaid
+flowchart LR
+  USER[Authenticated User] --> APEX[APEX App]
+
+  APEX -->|Authorized| VIEW[Views]
+  APEX -->|Controlled| PKG[PL/SQL APIs]
+
+  PKG --> DATA[Cost & Resource Data]
+
+  subgraph Controls
+    AUTH[Auth Schemes]
+    CFG[APP_CONFIG]
+    LOG[Audit Logs]
+  end
+
+  AUTH --> APEX
+  CFG --> PKG
+  PKG --> LOG
+```
 
 ---
 

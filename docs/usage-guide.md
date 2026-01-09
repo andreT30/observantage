@@ -272,7 +272,24 @@ This is typically used by:
 
 The following diagram shows how users typically move between pages.
 
-![APEX Page Interaction](diagrams/apex-pages.mmd)
+```mermaid
+flowchart TB
+  HOME[Home] --> WORK[Workloads]
+  HOME --> COST[Cost Report]
+  HOME --> USAGE[Usage Report]
+
+  WORK --> RESX[Resource Explorer]
+  COST --> RESX
+  USAGE --> RESX
+
+  HOME --> BOT[OVBot]
+  WORK --> BOT
+  COST --> BOT
+
+  ADMIN[Admin Pages] --> CFG[Configuration]
+  ADMIN --> JOBS[Scheduler Jobs]
+  ADMIN --> GLOSS[Glossary Management]
+```
 
 You can:
 - start from Home
