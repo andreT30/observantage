@@ -175,6 +175,34 @@ Summaries explain:
 
 ---
 
+## PII Protection and Tokenization (Critical)
+
+Before any content is sent to a Large Language Model (LLM), the application applies
+**PII tokenization**.
+
+### How it works
+1. **Detection**  
+   Potentially sensitive fields (PII) are identified based on configuration and rules.
+2. **Tokenization (pre-LLM)**  
+   All detected PII values are replaced with irreversible tokens **inside the database**
+   before the request is sent to the LLM.
+3. **LLM Processing**  
+   The LLM receives **only tokenized data**.  
+   No raw PII values are ever transmitted outside the database.
+4. **De-tokenization (post-LLM)**  
+   After the LLM response is received, tokens are resolved back to their original values
+   **inside the database** before rendering the final answer in the UI.
+
+### Security guarantee
+- **No Personally Identifiable Information (PII) is ever sent to any LLM**
+- Tokenization and de-tokenization are fully database-controlled
+- External services only see anonymized placeholders
+
+This design ensures compliance with internal security policies and privacy requirements,
+while still allowing natural-language summarization and explanation.
+
+---
+
 ## Logging & Traceability
 
 Every chatbot request records:

@@ -1,260 +1,240 @@
 # Security & Trust Model
 
-Home: [README](../README.md) · **Docs** · **Security & Trust Model**
-
-This document explains how the application protects data, enforces access, and ensures trustworthy results.
-
+This document describes how the application enforces security, privacy, and trust.
 It is written for:
-- end users who need confidence
-- administrators responsible for access
-- auditors and security reviewers
-- architects evaluating risk
+- security reviewers
+- architects
+- auditors
+- administrators
+
+The security model is **cloud-native, policy-driven, and auditable**.
 
 ---
 
-## Security Philosophy
+## Security Principles
 
-The application follows these core principles:
+The application is built on the following principles:
 
-- **Least privilege** at every layer
-- **No secrets in source control**
-- **Database-enforced access**
+- **No secrets**
+- **Least privilege**
+- **Policy-driven access**
+- **No PII exposure to AI services**
+- **Database-enforced controls**
 - **Full auditability**
-- **Explainable analytics and AI**
 
-Security is not an afterthought; it is part of the architecture.
-
----
-
-## Security Boundaries
-
-The diagram below illustrates where access control and auditability are enforced.
-
-```mermaid
-flowchart LR
-  USER[Authenticated User] --> APEX[APEX App]
-
-  APEX -->|Authorized| VIEW[Views]
-  APEX -->|Controlled| PKG[PL/SQL APIs]
-
-  PKG --> DATA[Cost & Resource Data]
-
-  subgraph Controls
-    AUTH[Auth Schemes]
-    CFG[APP_CONFIG]
-    LOG[Audit Logs]
-  end
-
-  AUTH --> APEX
-  CFG --> PKG
-  PKG --> LOG
-```
-
-All access is mediated through database logic and logged.
+Security is enforced primarily by **OCI IAM policies**, not application logic.
 
 ---
 
 ## Authentication
 
-### How users authenticate
-Authentication is handled by **Oracle APEX**, using one of:
-- OCI IAM / federated identity
-- enterprise SSO
-- database-backed authentication (if configured)
+Authentication is handled by **Oracle APEX** and supports:
 
-The application does **not** implement custom authentication logic.
+- **Oracle APEX Accounts**
+- **OCI Single Sign-On (SSO)**, including:
+  - OCI IAM
+  - Federated identity providers
+  - Enterprise SSO integrations
+
+The application does **not** implement custom authentication mechanisms.
 
 ---
 
-## Authorization & Roles
+## Authorization Model
 
-### Authorization Model
-Access is enforced using:
+### Roles
+
+The application currently defines **two roles only**:
+
+- **End Users**
+  - dashboards
+  - reports
+  - chatbot usage
+
+- **Administrators**
+  - configuration
+  - job control
+  - chatbot metadata
+  - update workflows
+
+Authorization is enforced via:
 - APEX authorization schemes
-- application roles
-- page- and component-level checks
-
-### Role Separation
-Typical roles include:
-- **End users** (dashboards, reports, chatbot)
-- **Power users** (advanced filters, saved reports)
-- **Administrators** (configuration, jobs, glossary)
-
-Administrative pages are not visible or accessible to standard users.
+- role-based access at page and component level
 
 ---
 
-## Data Access Boundaries
+## OCI Resource Principal (No Credentials)
 
-### Database-Centric Enforcement
-All data access:
-- occurs in the database
-- is mediated by views and PL/SQL packages
-- respects configuration and filters
+### Identity Model
 
-APEX pages do not bypass database logic.
+The database uses **OCI Resource Principal** (`OCI$RESOURCE_PRINCIPAL`) exclusively.
+
+- No API keys
+- No passwords
+- No stored credentials
+- No secrets in code or configuration
+
+All OCI access originates from the database **as an OCI resource**.
 
 ---
 
-### Compartment & Scope Control
-OCI data visibility is controlled via:
+### Dynamic Groups & Policies
+
+Access to OCI services and resources is controlled by:
+
+- **OCI Dynamic Groups**
+- **OCI IAM Policies**
+
+This ensures:
+- central enforcement
+- full auditability in OCI
+- zero credential leakage risk
+
+The application itself cannot bypass these policies.
+
+---
+
+## Compartment & Scope Control
+
+OCI data visibility is constrained by:
+
+- Dynamic Group membership
+- OCI IAM policies
 - configured root compartments
-- allowed region lists
-- workload definitions
 
-This ensures users only see **intended data scopes**.
+The application can only access:
+- compartments
+- regions
+- services
+explicitly allowed by OCI policy.
+
+There is **no application-level override** of OCI scope.
 
 ---
 
-## Secrets Management
+## PII Protection and LLM Safety
 
-### What is *not* stored in GitHub
-- OCI credentials
-- OAuth client secrets
-- private keys
-- wallet contents
-- tokens
+The application enforces a strict **no-PII-to-LLM** policy.
 
-### How secrets are handled
-- injected via database credentials
-- managed externally (OCI, ADB, or infrastructure tooling)
-- referenced by name only in code/config
+### Tokenization model
 
-GitHub contains **no sensitive material**.
+- All PII handling occurs **inside the database**
+- Sensitive values are **tokenized before any LLM interaction**
+- Tokenization is irreversible outside the database context
+
+### LLM interaction
+
+- LLMs receive **tokenized placeholders only**
+- No raw PII, secrets, or personal data are transmitted
+- External AI services never see real identifiers or values
+
+### Response rendering
+
+- LLM responses return tokenized placeholders
+- De-tokenization occurs **inside the database**
+- Only the final UI output contains resolved values
+
+### Security guarantee
+
+- **PII is never sent to any LLM**
+- Tokenization is deterministic and auditable
+- Privacy policies are enforced by design, not convention
 
 ---
 
 ## Chatbot Security (NL2SQL)
 
-### Deterministic SQL Generation
-The chatbot:
-- does not execute free-form SQL
-- generates SQL only from predefined metadata
-- restricts tables, columns, and clauses
+The chatbot is **deterministic and constrained**:
 
-This prevents:
-- SQL injection
-- data exfiltration
-- schema exploration
+- SQL is generated only from predefined metadata
+- Allowed tables, columns, and filters are whitelisted
+- Free-form SQL execution is not possible
 
----
+Additional safeguards:
+- execution limits
+- time-range constraints
+- full SQL logging
 
-### Execution Guardrails
-Before execution:
-- SQL is validated
-- row limits are enforced
-- time ranges are bounded
-
-Queries cannot escape the intended analytical scope.
+Every chatbot request is traceable end-to-end.
 
 ---
 
-### Transparency & Explainability
-For every chatbot request:
-- generated SQL is logged
-- applied filters are recorded
-- execution context is traceable
+## Secrets Management
 
-Users and auditors can see **exactly what was executed**.
+There are **no secrets** in this system.
+
+Specifically:
+- no OCI API keys
+- no OAuth secrets
+- no passwords
+- no tokens stored in tables or config
+- no secrets in GitHub
+
+Identity and access are fully delegated to OCI IAM.
 
 ---
 
 ## Logging & Auditability
 
-### What is logged
-- user actions (where relevant)
-- job executions
-- chatbot requests
-- SQL generation
+The system logs:
+- authentication events (via APEX / OCI)
+- deployment and update runs
+- scheduler job executions
+- chatbot requests and generated SQL
 - errors and warnings
 
-### Why this matters
-- incident investigation
-- cost attribution audits
-- compliance reviews
-- chatbot governance
-
-Logs are queryable and correlated via IDs.
+Logs are:
+- queryable
+- correlated by run/request IDs
+- suitable for audits and incident analysis
 
 ---
 
-## Data Integrity & Trust
+## Environment Model
 
-### Source of Truth
-All analytics derive from:
-- OCI Cost & Usage data
-- OCI resource metadata
+Each installation is a **standalone environment**:
 
-No manual overrides of cost values exist in the application.
+- one database
+- one APEX application
+- one OCI tenancy context
 
----
+There is:
+- no shared state
+- no cross-environment access
+- no implicit trust between environments
 
-### Configuration Transparency
-All behavior is driven by:
-- visible configuration tables
-- documented keys
-- auditable changes
-
-This avoids “hidden logic”.
-
----
-
-## Environment Isolation
-
-Each environment (DEV / TEST / PROD):
-- has its own database schema
-- has its own APP_CONFIG values
-- has isolated credentials and jobs
-
-Cross-environment data leakage is not possible by design.
+Isolation is inherent by deployment model.
 
 ---
 
 ## Common Security Questions
 
-### “Can users see raw OCI credentials?”
-No. Credentials are never exposed via UI or GitHub.
+### “Does the app store or transmit OCI credentials?”
+No. It uses OCI Resource Principal exclusively.
 
 ---
 
-### “Can the chatbot access data it shouldn’t?”
-No. It can only generate SQL against predefined metadata.
+### “Can the LLM see personal data?”
+No. All PII is tokenized before any LLM call.
 
 ---
 
-### “Can admins change cost numbers?”
-No. Admins can change configuration and metadata, not source cost data.
+### “Can admins bypass OCI policies?”
+No. OCI IAM policies are authoritative.
 
 ---
 
-### “Is this explainable to auditors?”
-Yes. Every result can be traced back to:
-- source data
-- configuration
-- generated SQL
-- execution logs
+### “Is this auditable?”
+Yes. All actions and data paths are logged and explainable.
 
 ---
 
-## Security Best Practices
+## Final Statement
 
-- Restrict admin access tightly
-- Review configuration changes
-- Monitor chatbot logs
-- Rotate credentials externally
-- Treat config as code
+This application uses **OCI-native security controls**, avoids secret-based access,
+and enforces privacy by design.
 
----
-
-## Final Note
-
-Security here is **practical, transparent, and auditable**.
-
-Users can trust the numbers.  
-Admins can control scope.  
-Auditors can verify behavior.
-
-This is by design.
+Trust is not assumed — it is **provable**.
 
 **See also**
 - [Admin Guide](admin-guide.md)
