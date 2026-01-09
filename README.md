@@ -76,7 +76,13 @@ This platform provides dashboards, reports, and tooling that directly support th
 
 ### FOCUS FinOps Standard Framework
 
-![FOCUS FinOps Framework](https://focus.finops.org/wp-content/uploads/2025/12/BG-Image-v3.png)
+<p align="center">
+  <img
+    src="https://focus.finops.org/wp-content/uploads/2025/12/BG-Image-v3.png"
+    alt="FOCUS FinOps Framework"
+    width="600"
+  />
+</p>
 
 *Source: https://focus.finops.org/*
 
