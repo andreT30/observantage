@@ -17,7 +17,7 @@ The design emphasizes:
 
 The following diagram shows the high-level system architecture and separation of concerns.
 
-![System Architecture](diagrams/architecture.mmd)
+[View System Architecture Diagram](diagrams/architecture.mmd)
 
 - Oracle APEX provides the presentation layer
 - All business logic resides in the database
