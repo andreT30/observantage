@@ -126,6 +126,8 @@ Detailed walkthrough:  [User Guide](docs/usage-guide.md)
 >
 
 ### Getting started
+- [Infrastructure Requirements](docs/infra-requirements.md)  
+  Required OCI setup, IAM policies, Dynamic Groups, and database prerequisites.
 - [User Guide](docs/usage-guide.md)  
   How to use dashboards, reports, and the chatbot.
 - [APEX Pages Map](docs/apex-pages.md)  
@@ -157,11 +159,24 @@ Detailed walkthrough:  [User Guide](docs/usage-guide.md)
 - [Deployment Manager API](docs/deploy-manager-api.md)  
   Supported export/import APIs.
 
+## Prerequisites (Read First)
+
+Before deploying this application, certain **OCI infrastructure prerequisites**
+must already be in place, including IAM policies, Dynamic Groups, and an
+Autonomous Database configuration.
+
+These requirements are mandatory and are enforced by design.
+
+➡️ See: [Infrastructure Requirements](docs/infra-requirements.md)
+
 ## Deployment vs Updates (important)
 
 This project **explicitly separates** initial deployment from application updates.
 
 ### Initial deployment
+- Initial deployment assumes that all infrastructure prerequisites
+described in [Infrastructure Requirements](docs/infra-requirements.md)
+have already been satisfied.
 - Performed **once per environment**
 - Executed via a **Deployment Manager PL/SQL package**
 - Consumes the **bundle ZIP as a ZIP (BLOB)** — no extraction
