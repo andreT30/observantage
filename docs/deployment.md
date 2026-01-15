@@ -124,9 +124,9 @@ Sample execution:
 ```sql
 sql demo_user/demo_pwd@db_high <<EOF
 VAR blob BLOB
-EXEC :app_id := 100
-EXEC :version_tag := 'v1.2.3'
-EXEC :manifest_json := '{"app":"focus-reports","version":"1.2.3"}'
+EXEC :app_id := 1200
+EXEC :version_tag := 'v20260109_134227'
+EXEC :manifest_json := '{"app":"focus-reports","version":"v20260109_134227"}'
 
 @insert_bundle.sql
 LOAD BLOB :blob FROM FILE 'bundle_app1200.zip'
