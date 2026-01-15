@@ -812,7 +812,6 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
   ----------------------------------------------------------------------------
   FUNCTION export_chatbot_seed RETURN CLOB IS
     l_out     CLOB := EMPTY_CLOB();
-    l_schema  VARCHAR2(128);
 
     --------------------------------------------------------------------------
     -- Quoting helpers (same semantics as your current ones)
@@ -870,7 +869,6 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
 
   BEGIN
     DBMS_LOB.CREATETEMPORARY(l_out, TRUE);
-    SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') INTO l_schema FROM dual;
 
     append_line('/* Seed data for CHATBOT_* tables exported from source environment. */');
     append_line('/* Tables: CHATBOT_PARAMETERS, CHATBOT_PARAMETER_COMPONENT, CHATBOT_GLOSSARY_RULES, CHATBOT_GLOSSARY_KEYWORDS */');
@@ -927,7 +925,7 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
           DBMS_SQL.COLUMN_VALUE(c, 7, v_en);
 
           append(
-            'MERGE INTO ' || LOWER(l_schema) || '.CHATBOT_PARAMETERS t' || CHR(10) ||
+            'MERGE INTO CHATBOT_PARAMETERS t' || CHR(10) ||
             'USING (' || CHR(10) ||
             '  SELECT ' || TO_CHAR(v_id) || ' AS ID,' || CHR(10) ||
             '         ' || q(v_ct)       || ' AS COMPONENT_TYPE,' || CHR(10) ||
@@ -997,7 +995,7 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
           DBMS_SQL.COLUMN_VALUE(c, 2, v_ct);
 
           append(
-            'MERGE INTO ' || LOWER(l_schema) || '.CHATBOT_PARAMETER_COMPONENT t' || CHR(10) ||
+            'MERGE INTO CHATBOT_PARAMETER_COMPONENT t' || CHR(10) ||
             'USING (' || CHR(10) ||
             '  SELECT ' || TO_CHAR(v_id) || ' AS ID,' || CHR(10) ||
             '         ' || q(v_ct)       || ' AS COMPONENT_TYPE' || CHR(10) ||
@@ -1106,7 +1104,7 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
           DBMS_SQL.COLUMN_VALUE(c, 17, v_updatedby);
 
           append(
-            'MERGE INTO ' || LOWER(l_schema) || '.CHATBOT_GLOSSARY_RULES t' || CHR(10) ||
+            'MERGE INTO CHATBOT_GLOSSARY_RULES t' || CHR(10) ||
             'USING (' || CHR(10) ||
             '  SELECT ' || TO_CHAR(v_id)         || ' AS ID,' || CHR(10) ||
             '         ' || q(v_dataset)          || ' AS DATASET,' || CHR(10) ||
@@ -1214,7 +1212,7 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
           DBMS_SQL.COLUMN_VALUE(c, 3, v_kw);
 
           append(
-            'MERGE INTO ' || LOWER(l_schema) || '.CHATBOT_GLOSSARY_KEYWORDS t' || CHR(10) ||
+            'MERGE INTO CHATBOT_GLOSSARY_KEYWORDS t' || CHR(10) ||
             'USING (' || CHR(10) ||
             '  SELECT ' || TO_CHAR(v_rule) || ' AS RULE_ID,' || CHR(10) ||
             '         ' || TO_CHAR(v_ord)  || ' AS ORD,' || CHR(10) ||
