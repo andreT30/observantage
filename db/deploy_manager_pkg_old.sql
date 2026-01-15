@@ -33,11 +33,7 @@ CREATE OR REPLACE PACKAGE deploy_mgr_pkg AS
     o_run_id            OUT NUMBER,
     o_job_name          OUT VARCHAR2
   );
-  -- Scheduler worker MUST use SQL types (no BOOLEAN args)
-    -- Job for deploy bundle (SQL-typed args; scheduler cannot pass BOOLEAN)
-  -- p_install_mode:
-  --   - 'INITIAL' : bootstrap APP_CONFIG with p_workspace_name + p_app_id then deploy
-  --   - 'UPDATE'  : deploy using existing APP_CONFIG values
+
   -- Job for deploy bundle (SQL-typed args; scheduler cannot pass BOOLEAN)
   -- p_install_mode:
   --   - 'INITIAL' : bootstrap APP_CONFIG with p_workspace_name + p_app_id then deploy
@@ -52,6 +48,17 @@ CREATE OR REPLACE PACKAGE deploy_mgr_pkg AS
     p_app_id            IN NUMBER,   -- required for INITIAL
     p_allow_overwrite   IN VARCHAR2  -- 'Y'/'N' (INITIAL only)
   );
+
+  -- One-time bootstrap install.
+  -- Creates APP_CONFIG if missing, stores APEX_WORKSPACE_NAME + APEX_APP_ID, then deploys the bundle.
+  PROCEDURE initial_install(
+    p_bundle_id       IN NUMBER,
+    p_workspace_name  IN VARCHAR2,
+    p_app_id          IN NUMBER,
+    p_enable_jobs_after IN BOOLEAN DEFAULT FALSE,
+    p_dry_run         IN BOOLEAN DEFAULT FALSE
+  );
+
 END deploy_mgr_pkg;
 /
 
@@ -124,6 +131,24 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
       DBMS_LOB.CREATETEMPORARY(p_out, TRUE);
     END IF;
     DBMS_LOB.APPEND(p_out, p_line || CHR(10));
+  END;
+
+  FUNCTION strip_schema_prefix(p_txt IN VARCHAR2) RETURN VARCHAR2 IS
+    l_txt VARCHAR2(32767) := p_txt;
+  BEGIN
+    IF l_txt IS NULL THEN
+      RETURN NULL;
+    END IF;
+
+    -- Remove references to the exporting schema only (quoted/unquoted)
+    l_txt := REGEXP_REPLACE(
+               l_txt,
+               '("?'||USER||'"?)\.',
+               '',
+               1, 0, 'i'
+             );
+
+    RETURN l_txt;
   END;
 
   ------- Autonomous start
@@ -206,28 +231,6 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
     DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM,'EMIT_SCHEMA', FALSE);
   END;
 
-  
-
-  ------------------------------------------------------------------------------
-  -- Strip exporting schema prefix from stored procedure references (jobs/actions)
-  ------------------------------------------------------------------------------
-  FUNCTION strip_schema_prefix(p_txt IN VARCHAR2) RETURN VARCHAR2 IS
-    l_txt VARCHAR2(32767) := p_txt;
-  BEGIN
-    IF l_txt IS NULL THEN
-      RETURN NULL;
-    END IF;
-
-    -- Remove references to the exporting schema only (quoted/unquoted)
-    l_txt := REGEXP_REPLACE(
-              l_txt,
-              '("?'||USER||'"?)\.',
-              '',
-              1, 0, 'i'
-            );
-
-    RETURN l_txt;
-  END strip_schema_prefix;
   FUNCTION get_ddl_safe(p_type IN VARCHAR2, p_name IN VARCHAR2) RETURN CLOB IS
     l_ddl CLOB;
     l_t   VARCHAR2(128) := UPPER(p_type);
@@ -584,10 +587,8 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
       RETURN NULL;
   END get_app_config_value;
 
-  
-
   ------------------------------------------------------------------------------
-  -- APP_CONFIG bootstrap + APEX target resolution
+  -- Ensure APP_CONFIG exists (bootstrap-safe)
   ------------------------------------------------------------------------------
   PROCEDURE ensure_app_config_table(p_run_id IN NUMBER, p_dry_run IN BOOLEAN) IS
   BEGIN
@@ -613,8 +614,11 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
           RAISE;
         END IF;
     END;
-  END ensure_app_config_table;
+  END;
 
+  ------------------------------------------------------------------------------
+  -- Upsert APP_CONFIG value (no compile-time dependency)
+  ------------------------------------------------------------------------------
   PROCEDURE upsert_app_config(
     p_run_id  IN NUMBER,
     p_key     IN VARCHAR2,
@@ -631,14 +635,19 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
       MERGE INTO app_config c
       USING (SELECT :k config_key, :v config_value FROM dual) s
       ON (c.config_key = s.config_key)
-      WHEN MATCHED THEN UPDATE SET c.config_value = s.config_value, c.updated_at = SYSDATE
+      WHEN MATCHED THEN UPDATE
+        SET c.config_value = s.config_value,
+            c.updated_at   = SYSDATE
       WHEN NOT MATCHED THEN INSERT (config_key, config_value, updated_at)
         VALUES (s.config_key, s.config_value, SYSDATE)
     ]' USING p_key, p_val;
 
     run_log(p_run_id, 'APP_CONFIG set: '||p_key);
-  END upsert_app_config;
+  END;
 
+  ------------------------------------------------------------------------------
+  -- Resolve APEX target workspace/app id from APP_CONFIG
+  ------------------------------------------------------------------------------
   PROCEDURE resolve_apex_target(
     p_run_id     IN NUMBER,
     o_workspace  OUT VARCHAR2,
@@ -646,22 +655,24 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
   ) IS
     l_app_id_txt VARCHAR2(32767);
   BEGIN
-    o_workspace  := get_app_config_value('APEX_WORKSPACE_NAME');
+    o_workspace := get_app_config_value('APEX_WORKSPACE_NAME');
     l_app_id_txt := get_app_config_value('APEX_APP_ID');
 
     IF o_workspace IS NULL OR l_app_id_txt IS NULL THEN
-      raise_application_error(-20020,
-        'Missing APP_CONFIG keys APEX_WORKSPACE_NAME and/or APEX_APP_ID. Use enqueue_deploy with p_install_mode=INITIAL first.');
+      raise_application_error(
+        -20020,
+        'Missing APP_CONFIG keys APEX_WORKSPACE_NAME and/or APEX_APP_ID. Run initial_install first.'
+      );
     END IF;
 
     BEGIN
       o_app_id := TO_NUMBER(TRIM(l_app_id_txt));
     EXCEPTION
       WHEN OTHERS THEN
-        raise_application_error(-20021,
-          'Invalid APP_CONFIG APEX_APP_ID value: '||SUBSTR(l_app_id_txt,1,200));
+        raise_application_error(-20021, 'Invalid APP_CONFIG APEX_APP_ID value: '||SUBSTR(l_app_id_txt,1,200));
     END;
-  END resolve_apex_target;
+  END;
+
   ------------------------------------------------------------------------------
   -- APP_CONFIG seed export (selected keys -> MERGE statements)
   ------------------------------------------------------------------------------
@@ -812,8 +823,6 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
   ----------------------------------------------------------------------------
   FUNCTION export_chatbot_seed RETURN CLOB IS
     l_out     CLOB := EMPTY_CLOB();
-    l_schema  VARCHAR2(128);
-
     --------------------------------------------------------------------------
     -- Quoting helpers (same semantics as your current ones)
     --------------------------------------------------------------------------
@@ -870,8 +879,6 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
 
   BEGIN
     DBMS_LOB.CREATETEMPORARY(l_out, TRUE);
-    SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') INTO l_schema FROM dual;
-
     append_line('/* Seed data for CHATBOT_* tables exported from source environment. */');
     append_line('/* Tables: CHATBOT_PARAMETERS, CHATBOT_PARAMETER_COMPONENT, CHATBOT_GLOSSARY_RULES, CHATBOT_GLOSSARY_KEYWORDS */');
     append_line('');
@@ -927,7 +934,7 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
           DBMS_SQL.COLUMN_VALUE(c, 7, v_en);
 
           append(
-            'MERGE INTO ' || LOWER(l_schema) || '.CHATBOT_PARAMETERS t' || CHR(10) ||
+            'MERGE INTO CHATBOT_PARAMETERS t' || CHR(10) ||
             'USING (' || CHR(10) ||
             '  SELECT ' || TO_CHAR(v_id) || ' AS ID,' || CHR(10) ||
             '         ' || q(v_ct)       || ' AS COMPONENT_TYPE,' || CHR(10) ||
@@ -997,7 +1004,7 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
           DBMS_SQL.COLUMN_VALUE(c, 2, v_ct);
 
           append(
-            'MERGE INTO ' || LOWER(l_schema) || '.CHATBOT_PARAMETER_COMPONENT t' || CHR(10) ||
+            'MERGE INTO CHATBOT_PARAMETER_COMPONENT t' || CHR(10) ||
             'USING (' || CHR(10) ||
             '  SELECT ' || TO_CHAR(v_id) || ' AS ID,' || CHR(10) ||
             '         ' || q(v_ct)       || ' AS COMPONENT_TYPE' || CHR(10) ||
@@ -1106,7 +1113,7 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
           DBMS_SQL.COLUMN_VALUE(c, 17, v_updatedby);
 
           append(
-            'MERGE INTO ' || LOWER(l_schema) || '.CHATBOT_GLOSSARY_RULES t' || CHR(10) ||
+            'MERGE INTO CHATBOT_GLOSSARY_RULES t' || CHR(10) ||
             'USING (' || CHR(10) ||
             '  SELECT ' || TO_CHAR(v_id)         || ' AS ID,' || CHR(10) ||
             '         ' || q(v_dataset)          || ' AS DATASET,' || CHR(10) ||
@@ -1214,7 +1221,7 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
           DBMS_SQL.COLUMN_VALUE(c, 3, v_kw);
 
           append(
-            'MERGE INTO ' || LOWER(l_schema) || '.CHATBOT_GLOSSARY_KEYWORDS t' || CHR(10) ||
+            'MERGE INTO CHATBOT_GLOSSARY_KEYWORDS t' || CHR(10) ||
             'USING (' || CHR(10) ||
             '  SELECT ' || TO_CHAR(v_rule) || ' AS RULE_ID,' || CHR(10) ||
             '         ' || TO_CHAR(v_ord)  || ' AS ORD,' || CHR(10) ||
@@ -1312,12 +1319,11 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
       OR p_table_name LIKE 'VALIDATE$%';    -- Oracle auto VALIDATE$ tables
   END;
 
-  
-
   FUNCTION has_iseq_default(p_txt IN VARCHAR2) RETURN BOOLEAN IS
   BEGIN
     RETURN p_txt IS NOT NULL AND REGEXP_LIKE(p_txt, 'ISEQ\$\$_', 'i');
   END;
+
   FUNCTION wrap_add_column_if_missing(
     p_table_name  IN VARCHAR2,
     p_column_name IN VARCHAR2,
@@ -1338,7 +1344,7 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
       '     AND hidden_column = ''NO'';'||CHR(10)||
       '  IF l_cnt = 0 THEN'||CHR(10)||
       '    EXECUTE IMMEDIATE q''~ALTER TABLE '||UPPER(p_table_name)||
-            ' ADD ('||l_q||')~'';'||CHR(10)||
+             ' ADD ('||l_q||')~'';'||CHR(10)||
       '  END IF;'||CHR(10)||
       'END;'||CHR(10)||'/'||CHR(10)||CHR(10)
     );
@@ -1354,9 +1360,9 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
     SELECT *
       INTO r
       FROM user_tab_cols
-    WHERE table_name = UPPER(p_table)
-      AND column_name = UPPER(p_col)
-      AND hidden_column = 'NO';
+     WHERE table_name = UPPER(p_table)
+       AND column_name = UPPER(p_col)
+       AND hidden_column = 'NO';
 
     -- datatype
     IF r.data_type IN ('VARCHAR2','CHAR','NCHAR','NVARCHAR2') THEN
@@ -1385,11 +1391,11 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
 
       -- Remove identity-internal default (e.g. "SCHEMA"."ISEQ$$_nnn".nextval)
       l_def := REGEXP_REPLACE(
-                l_def,
-                '\s+DEFAULT\s+("?[A-Z0-9_$#]+"?\.)?"?ISEQ\$\$_[0-9]+"?\s*\.\s*NEXTVAL',
-                '',
-                1, 0, 'i'
-              );
+                 l_def,
+                 '\s+DEFAULT\s+("?[A-Z0-9_$#]+"?\.)?"?ISEQ\$\$_[0-9]+"?\s*\.\s*NEXTVAL',
+                 '',
+                 1, 0, 'i'
+               );
     END IF;
 
     -- nullability
@@ -1639,6 +1645,7 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
           l_col VARCHAR2(32767);
         BEGIN
           l_col := col_def(c.table_name, c.column_name);
+
           -- Skip any column DDL still referencing ISEQ$$ (safety net)
           IF l_col IS NOT NULL AND NOT has_iseq_default(l_col) THEN
             DBMS_LOB.APPEND(l_out,
@@ -1656,7 +1663,7 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
   END;
 
   ------------------------------------------------------------------------------
-  -- Export APEX application
+  -- Export APEX application (App 1200)
   ------------------------------------------------------------------------------
   FUNCTION export_apex_app(p_app_id IN NUMBER) RETURN CLOB IS
     l_files apex_t_export_files;
@@ -2253,21 +2260,38 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
       -- Read desired scheme from APP_CONFIG (target-owned)
       --------------------------------------------------------------------
       DECLARE
-        l_scheme_name  VARCHAR2(255);
-        l_ws_id        NUMBER;
-        l_app_id       NUMBER;
-        l_ws_name      VARCHAR2(255);
+        l_scheme_name  varchar2(255);
+        l_ws_id        number;
       BEGIN
         l_scheme_name := get_app_config_value('l_auth_scheme_name');
 
-        -- Set workspace context + resolve target app id ONCE
-        resolve_apex_target(p_run_id, l_ws_name, l_app_id);
+        -- Set workspace context (safe to do even if l_scheme_name is null)
+        DECLARE
+          l_scheme_name  VARCHAR2(255);
+          l_ws_id        NUMBER;
+          l_ws_name      VARCHAR2(255);
+          l_app_id       NUMBER;
+        BEGIN
+          l_scheme_name := get_app_config_value('l_auth_scheme_name');
 
-        l_ws_id := apex_util.find_security_group_id(p_workspace => l_ws_name);
+          -- Resolve workspace + app id from APP_CONFIG
+          resolve_apex_target(p_run_id, l_ws_name, l_app_id);
+
+          l_ws_id := apex_util.find_security_group_id(p_workspace => l_ws_name);
+          apex_util.set_security_group_id(l_ws_id);
+
+          -- Ensure install targets the configured app id (initial/new or update/in-place)
+          apex_application_install.set_schema(USER);
+          apex_application_install.set_application_id(l_app_id);
+
+          IF l_scheme_name IS NOT NULL THEN
+            run_log(p_run_id, 'PRE-IMPORT: overriding authentication scheme to "'||l_scheme_name||'"');
+            apex_application_install.set_authentication_scheme(p_name => l_scheme_name);
+          ELSE
+            run_log(p_run_id, 'PRE-IMPORT: no l_auth_scheme_name in APP_CONFIG; letting import set auth scheme.');
+          END IF;
+        END;
         apex_util.set_security_group_id(l_ws_id);
-
-        apex_application_install.set_schema(USER);
-        apex_application_install.set_application_id(l_app_id);
 
         -- PRE-IMPORT override only if scheme name is present
         IF l_scheme_name IS NOT NULL THEN
@@ -2285,46 +2309,40 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
 
       --------------------------------------------------------------------
       -- POST-IMPORT: enforce + verify if scheme name is present
+      -- NOTE: Discovery URL is handled via #DISCOVERY_URL# + FOCUS_AUTH_CONFIG
       --------------------------------------------------------------------
       DECLARE
-        l_scheme_name  VARCHAR2(255);
-        l_ws_id        NUMBER;
-        l_app_id       NUMBER;
+        l_scheme_name  varchar2(255);
+        l_ws_id        number;
         l_ws_name      VARCHAR2(255);
-
-        l_cnt          NUMBER;
-        l_current      VARCHAR2(255);
-        l_oidc_url     VARCHAR2(4000);
-        l_disc_attr    VARCHAR2(4000);
+        l_app_id       NUMBER;
+        l_cnt          number;
+        l_current      varchar2(255);
+        l_oidc_url     varchar2(4000);
+        l_disc_attr    varchar2(4000);
       BEGIN
         l_scheme_name := get_app_config_value('l_auth_scheme_name');
+
+        resolve_apex_target(p_run_id, l_ws_name, l_app_id);
 
         IF l_scheme_name IS NULL THEN
           run_log(p_run_id, 'POST-IMPORT: no l_auth_scheme_name in APP_CONFIG; skipping auth enforcement/verification.');
           RETURN;
         END IF;
 
-        -- Resolve + set workspace context again (clean + explicit)
-        resolve_apex_target(p_run_id, l_ws_name, l_app_id);
-
         l_ws_id := apex_util.find_security_group_id(p_workspace => l_ws_name);
         apex_util.set_security_group_id(l_ws_id);
 
-        apex_application_install.set_schema(USER);
-        apex_application_install.set_application_id(l_app_id);
-
         -- Guard: scheme must exist in imported app
-        SELECT COUNT(*)
+        SELECT count(*)
           INTO l_cnt
           FROM apex_application_auth
-         WHERE application_id = l_app_id
-           AND authentication_scheme_name = l_scheme_name;
+        WHERE application_id = l_app_id
+          AND authentication_scheme_name = l_scheme_name;
 
         IF l_cnt = 0 THEN
-          raise_application_error(
-            -20002,
-            'Auth scheme "'||l_scheme_name||'" not found in app '||l_app_id||' after import.'
-          );
+          raise_application_error(-20002,
+            'Auth scheme "'||l_scheme_name||'" not found in app 1200 after import.');
         END IF;
 
         -- Enforce active scheme (requires APEX_ADMINISTRATOR_ROLE)
@@ -2339,18 +2357,20 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
           FROM apex_applications a
           JOIN apex_application_auth aa
             ON aa.application_id = a.application_id
-           AND aa.authentication_scheme_id = a.authentication_scheme_id
-         WHERE a.application_id = l_app_id;
+          AND aa.authentication_scheme_id = a.authentication_scheme_id
+        WHERE a.application_id = l_app_id;
 
         IF l_current <> l_scheme_name THEN
-          raise_application_error(
-            -20003,
-            'Auth scheme mismatch. Expected='||l_scheme_name||' Current='||l_current
-          );
+          raise_application_error(-20003,
+            'Auth scheme mismatch. Expected='||l_scheme_name||' Current='||l_current);
         END IF;
 
+        ----------------------------------------------------------------
         -- OCI SSO checks (LOG ONLY)
-        IF UPPER(l_scheme_name) = UPPER('OCI SSO') THEN
+        -- ATTRIBUTE_03 = Discovery URL in your environment
+        ----------------------------------------------------------------
+        IF upper(l_scheme_name) = upper('OCI SSO') THEN
+          -- Log whether APP_CONFIG has URL (null allowed)
           l_oidc_url := get_app_config_value('OIDC_DISCOVERY_URL');
 
           IF l_oidc_url IS NULL THEN
@@ -2359,12 +2379,13 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
             run_log(p_run_id, 'OIDC_DISCOVERY_URL present in APP_CONFIG.');
           END IF;
 
+          -- Log whether imported scheme uses #DISCOVERY_URL# placeholder
           BEGIN
             SELECT attribute_03
               INTO l_disc_attr
               FROM apex_application_auth
-             WHERE application_id = l_app_id
-               AND authentication_scheme_name = l_scheme_name;
+            WHERE application_id = l_app_id
+              AND authentication_scheme_name = l_scheme_name;
           EXCEPTION
             WHEN OTHERS THEN
               l_disc_attr := NULL;
@@ -2372,14 +2393,12 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
 
           IF l_disc_attr IS NULL THEN
             run_log(p_run_id, 'WARN: Could not read ATTRIBUTE_03 (Discovery URL) for scheme "'||l_scheme_name||'".');
-          ELSIF INSTR(UPPER(l_disc_attr), '#DISCOVERY_URL#') > 0 THEN
+          ELSIF instr(upper(l_disc_attr), '#DISCOVERY_URL#') > 0 THEN
             run_log(p_run_id, 'INFO: Auth scheme "'||l_scheme_name||'" Discovery URL uses #DISCOVERY_URL# placeholder.');
           ELSE
-            run_log(
-              p_run_id,
+            run_log(p_run_id,
               'WARN: Auth scheme "'||l_scheme_name||'" Discovery URL is hard-coded (expected #DISCOVERY_URL#). Value starts: '||
-              SUBSTR(l_disc_attr, 1, 200)
-            );
+              substr(l_disc_attr,1,200));
           END IF;
         END IF;
       END;
@@ -2420,124 +2439,122 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
       RAISE;
   END;
 
+  ------------------------------------------------------------------------------
+  -- Initial install (bootstrap): create APP_CONFIG, store APEX workspace/app id,
+  -- then deploy bundle normally (APEX import will read from APP_CONFIG).
+  ------------------------------------------------------------------------------
+  PROCEDURE initial_install(
+    p_bundle_id         IN NUMBER,
+    p_workspace_name    IN VARCHAR2,
+    p_app_id            IN NUMBER,
+    p_enable_jobs_after IN BOOLEAN DEFAULT FALSE,
+    p_dry_run           IN BOOLEAN DEFAULT FALSE
+  ) IS
+    l_run_id NUMBER;
+  BEGIN
+    l_run_id := run_start('INITIAL_INSTALL', p_bundle_id);
+    run_log(l_run_id,
+      'Initial install start. bundle_id='||p_bundle_id||
+      ' workspace='||NVL(p_workspace_name,'<null>')||
+      ' app_id='||TO_CHAR(p_app_id)||
+      ' dry_run='||CASE WHEN p_dry_run THEN 'Y' ELSE 'N' END
+    );
+
+    IF p_workspace_name IS NULL THEN
+      raise_application_error(-20022, 'p_workspace_name is required for initial_install.');
+    END IF;
+
+    IF p_app_id IS NULL THEN
+      raise_application_error(-20023, 'p_app_id is required for initial_install.');
+    END IF;
+
+    -- Ensure APP_CONFIG exists, then persist the two keys
+    ensure_app_config_table(p_run_id => l_run_id, p_dry_run => p_dry_run);
+
+    upsert_app_config(l_run_id, 'APEX_WORKSPACE_NAME', p_workspace_name, p_dry_run);
+    upsert_app_config(l_run_id, 'APEX_APP_ID',        TO_CHAR(p_app_id), p_dry_run);
+
+    -- Continue with normal deployment (will read APP_CONFIG and import accordingly)
+    deploy_bundle_internal(
+      p_run_id            => l_run_id,
+      p_bundle_id         => p_bundle_id,
+      p_enable_jobs_after => p_enable_jobs_after,
+      p_dry_run           => p_dry_run
+    );
+
+  EXCEPTION
+    WHEN OTHERS THEN
+      run_fail(l_run_id, DBMS_UTILITY.FORMAT_ERROR_STACK||CHR(10)||DBMS_UTILITY.FORMAT_ERROR_BACKTRACE);
+      COMMIT;
+      RAISE;
+  END initial_install;
+
   -- Job for deploy bundle (SQL-typed args; scheduler cannot pass BOOLEAN)
   PROCEDURE deploy_worker(
     p_run_id            IN NUMBER,
     p_bundle_id         IN NUMBER,
     p_enable_jobs_after IN VARCHAR2,  -- 'Y'/'N'
-    p_dry_run           IN VARCHAR2,  -- 'Y'/'N'
-    p_install_mode      IN VARCHAR2,  -- 'INITIAL'/'UPDATE'
-    p_workspace_name    IN VARCHAR2,  -- required for INITIAL
-    p_app_id            IN NUMBER,    -- required for INITIAL
-    p_allow_overwrite   IN VARCHAR2   -- 'Y'/'N' (INITIAL only)
+    p_dry_run           IN VARCHAR2   -- 'Y'/'N'
   ) IS
-      l_enable_jobs_after BOOLEAN := (NVL(UPPER(p_enable_jobs_after),'N') = 'Y');
-      l_dry_run           BOOLEAN := (NVL(UPPER(p_dry_run),'N') = 'Y');
-    
-      l_mode            VARCHAR2(10) := UPPER(NVL(p_install_mode,'UPDATE'));
-
-      l_allow_overwrite VARCHAR2(1) := UPPER(NVL(p_allow_overwrite,'N'));
+    l_enable_jobs_after BOOLEAN := (NVL(UPPER(p_enable_jobs_after),'N') = 'Y');
+    l_dry_run           BOOLEAN := (NVL(UPPER(p_dry_run),'N') = 'Y');
   BEGIN
-      run_log(p_run_id, 'Worker start (job). bundle_id='||p_bundle_id||
-                        ' enable_jobs_after='||CASE WHEN l_enable_jobs_after THEN 'Y' ELSE 'N' END||
-                        ' dry_run='||CASE WHEN l_dry_run THEN 'Y' ELSE 'N' END);
+    run_log(p_run_id, 'Worker start (job). bundle_id='||p_bundle_id||
+                      ' enable_jobs_after='||CASE WHEN l_enable_jobs_after THEN 'Y' ELSE 'N' END||
+                      ' dry_run='||CASE WHEN l_dry_run THEN 'Y' ELSE 'N' END);
 
-      
+    deploy_bundle_internal(
+      p_run_id            => p_run_id,
+      p_bundle_id         => p_bundle_id,
+      p_enable_jobs_after => l_enable_jobs_after,
+      p_dry_run           => l_dry_run
+    );
 
-      IF l_mode = 'INITIAL' THEN
-        IF p_workspace_name IS NULL OR p_app_id IS NULL THEN
-          raise_application_error(-20030, 'INITIAL mode requires p_workspace_name and p_app_id.');
-        END IF;
-        ensure_app_config_table(p_run_id => p_run_id, p_dry_run => l_dry_run);
-
-        -- Guard: do not overwrite an existing app id unless allowed
-        IF NOT l_dry_run THEN
-          DECLARE
-            l_ws_id NUMBER;
-            l_cnt   NUMBER;
-          BEGIN
-            l_ws_id := apex_util.find_security_group_id(p_workspace => p_workspace_name);
-            apex_util.set_security_group_id(l_ws_id);
-
-            SELECT COUNT(*)
-              INTO l_cnt
-              FROM apex_applications
-            WHERE application_id = p_app_id;
-
-            IF l_cnt > 0 AND l_allow_overwrite <> 'Y' THEN
-              raise_application_error(-20031,
-                'APEX app id '||p_app_id||' already exists in workspace '||p_workspace_name||
-                '. Re-run with p_allow_overwrite=Y or choose a different p_app_id.');
-            END IF;
-          END;
-        END IF;
-
-      upsert_app_config(p_run_id, 'APEX_WORKSPACE_NAME', p_workspace_name, l_dry_run);
-        upsert_app_config(p_run_id, 'APEX_APP_ID',        TO_CHAR(p_app_id), l_dry_run);
-      END IF;
-      deploy_bundle_internal(
-            p_run_id            => p_run_id,
-            p_bundle_id         => p_bundle_id,
-            p_enable_jobs_after => l_enable_jobs_after,
-            p_dry_run           => l_dry_run
-          );
-
-    EXCEPTION
-      WHEN OTHERS THEN
-        run_fail(p_run_id, DBMS_UTILITY.FORMAT_ERROR_STACK||CHR(10)||DBMS_UTILITY.FORMAT_ERROR_BACKTRACE);
-        RAISE;
+  EXCEPTION
+    WHEN OTHERS THEN
+      run_fail(p_run_id, DBMS_UTILITY.FORMAT_ERROR_STACK||CHR(10)||DBMS_UTILITY.FORMAT_ERROR_BACKTRACE);
+      RAISE;
   END;
 
   PROCEDURE enqueue_deploy(
     p_bundle_id         IN NUMBER,
     p_enable_jobs_after IN BOOLEAN DEFAULT FALSE,
     p_dry_run           IN BOOLEAN DEFAULT FALSE,
-    p_install_mode      IN VARCHAR2 DEFAULT 'UPDATE', -- 'INITIAL'/'UPDATE'
-    p_workspace_name    IN VARCHAR2 DEFAULT NULL,     -- only used for INITIAL
-    p_app_id            IN NUMBER   DEFAULT NULL,     -- only used for INITIAL
-    p_allow_overwrite   IN VARCHAR2 DEFAULT 'N',      -- 'Y'/'N' (INITIAL only)
     o_run_id            OUT NUMBER,
     o_job_name          OUT VARCHAR2
   ) IS
-      l_job_name VARCHAR2(128);
-    BEGIN
-      o_run_id := run_start('DEPLOY', p_bundle_id);
-      run_log(o_run_id, 'Enqueue deploy. dry_run='||CASE WHEN p_dry_run THEN 'Y' ELSE 'N' END);
+    l_job_name VARCHAR2(128);
+  BEGIN
+    o_run_id := run_start('DEPLOY', p_bundle_id);
+    run_log(o_run_id, 'Enqueue deploy. dry_run='||CASE WHEN p_dry_run THEN 'Y' ELSE 'N' END);
 
-      l_job_name := 'DEPLOY_'||o_run_id;
+    l_job_name := 'DEPLOY_'||o_run_id;
 
-      DBMS_SCHEDULER.CREATE_JOB(
-        job_name            => l_job_name,
-        job_type            => 'STORED_PROCEDURE',
-        job_action          => 'DEPLOY_MGR_PKG.DEPLOY_WORKER',
-        number_of_arguments => 8,
-        enabled             => FALSE,
-        auto_drop           => TRUE
-      );
+    DBMS_SCHEDULER.CREATE_JOB(
+      job_name            => l_job_name,
+      job_type            => 'STORED_PROCEDURE',
+      job_action          => 'DEPLOY_MGR_PKG.DEPLOY_WORKER',
+      number_of_arguments => 4,
+      enabled             => FALSE,
+      auto_drop           => TRUE
+    );
 
-      DBMS_SCHEDULER.SET_JOB_ARGUMENT_VALUE(l_job_name, 1, TO_CHAR(o_run_id));
-      DBMS_SCHEDULER.SET_JOB_ARGUMENT_VALUE(l_job_name, 2, TO_CHAR(p_bundle_id));
-      DBMS_SCHEDULER.SET_JOB_ARGUMENT_VALUE(l_job_name, 3, CASE WHEN p_enable_jobs_after THEN 'Y' ELSE 'N' END);
-      DBMS_SCHEDULER.SET_JOB_ARGUMENT_VALUE(l_job_name, 4, CASE WHEN p_dry_run THEN 'Y' ELSE 'N' END);
+    DBMS_SCHEDULER.SET_JOB_ARGUMENT_VALUE(l_job_name, 1, TO_CHAR(o_run_id));
+    DBMS_SCHEDULER.SET_JOB_ARGUMENT_VALUE(l_job_name, 2, TO_CHAR(p_bundle_id));
+    DBMS_SCHEDULER.SET_JOB_ARGUMENT_VALUE(l_job_name, 3, CASE WHEN p_enable_jobs_after THEN 'Y' ELSE 'N' END);
+    DBMS_SCHEDULER.SET_JOB_ARGUMENT_VALUE(l_job_name, 4, CASE WHEN p_dry_run THEN 'Y' ELSE 'N' END);
 
-      
+    DBMS_SCHEDULER.ENABLE(l_job_name);
 
-      DBMS_SCHEDULER.SET_JOB_ARGUMENT_VALUE(l_job_name, 5, NVL(p_install_mode,'UPDATE'));
-      DBMS_SCHEDULER.SET_JOB_ARGUMENT_VALUE(l_job_name, 6, p_workspace_name);
-      DBMS_SCHEDULER.SET_JOB_ARGUMENT_VALUE(l_job_name, 7, CASE WHEN p_app_id IS NULL THEN NULL ELSE TO_CHAR(p_app_id) END);
+    o_job_name := l_job_name;
+    run_log(o_run_id, 'Job submitted: '||l_job_name);
 
-      DBMS_SCHEDULER.SET_JOB_ARGUMENT_VALUE(l_job_name, 8, NVL(p_allow_overwrite,'N'));
-      DBMS_SCHEDULER.ENABLE(l_job_name);
-
-      o_job_name := l_job_name;
-      run_log(o_run_id, 'Job submitted: '||l_job_name);
-
-      COMMIT;
-    EXCEPTION
-      WHEN OTHERS THEN
-        IF o_run_id IS NOT NULL THEN
-          run_fail(o_run_id, DBMS_UTILITY.FORMAT_ERROR_STACK||CHR(10)||DBMS_UTILITY.FORMAT_ERROR_BACKTRACE);
-        END IF;
+    COMMIT;
+  EXCEPTION
+    WHEN OTHERS THEN
+      IF o_run_id IS NOT NULL THEN
+        run_fail(o_run_id, DBMS_UTILITY.FORMAT_ERROR_STACK||CHR(10)||DBMS_UTILITY.FORMAT_ERROR_BACKTRACE);
+      END IF;
       RAISE;
   END;
 

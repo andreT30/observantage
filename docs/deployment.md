@@ -97,22 +97,28 @@ MANIFSET_JSON example:
 ---
 
 ### Step 3 — Deploy (scheduled job only)
-Initial deployment is performed **via scheduler job**, not synchronously. BUNDLE_ID is the chosen ID during upload in Step 2
+Initial deployment is performed **via scheduler job**, not synchronously. 
+- `BUNDLE_ID` - is the chosen ID during upload in Step 2
+- `INITIAL` - for new installations
+- `YOUR_WORKSPACE` - APEX target workspace name
+- `APP_ID` - target APEX id (default is 1200)
+- `ALLOW_OVERWRITE` - If target APP_ID already exists in target APEX <b><u>Instance</u></b> it will overwrite it. <u>Make sure no application with the same ID exists on the same APEX instance</u>
+
 
 ```sql
 DECLARE
-  l_run_id   NUMBER;
-  l_job_name VARCHAR2(128);
+  l_run_id  NUMBER;
+  l_job     VARCHAR2(128);
 BEGIN
   deploy_mgr_pkg.enqueue_deploy(
-    p_bundle_id         => :BUNDLE_ID,
-    p_enable_jobs_after => FALSE,
-    p_dry_run           => FALSE,
-    o_run_id            => l_run_id,
-    o_job_name          => l_job_name
+    p_bundle_id        => :bundle_id,
+    p_install_mode     => 'INITIAL',
+    p_workspace_name   => 'YOUR_WORKSPACE',
+    p_app_id           => APP_ID,
+    p_allow_overwrite  => 'N',
+    o_run_id           => l_run_id,
+    o_job_name         => l_job
   );
-
-  DBMS_OUTPUT.PUT_LINE('RUN_ID='||l_run_id||' JOB='||l_job_name);
 END;
 /
 ```
