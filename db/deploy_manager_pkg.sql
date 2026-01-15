@@ -29,6 +29,7 @@ CREATE OR REPLACE PACKAGE deploy_mgr_pkg AS
     p_install_mode      IN VARCHAR2 DEFAULT 'UPDATE', -- 'INITIAL'/'UPDATE'
     p_workspace_name    IN VARCHAR2 DEFAULT NULL,     -- only used for INITIAL
     p_app_id            IN NUMBER   DEFAULT NULL,     -- only used for INITIAL
+    p_auth_scheme_name IN VARCHAR2 DEFAULT 'Oracle APEX Accounts', -- Default Auth Scheme
     p_allow_overwrite   IN VARCHAR2 DEFAULT 'N',      -- 'Y'/'N' (INITIAL only)
     o_run_id            OUT NUMBER,
     o_job_name          OUT VARCHAR2
@@ -50,7 +51,8 @@ CREATE OR REPLACE PACKAGE deploy_mgr_pkg AS
     p_install_mode      IN VARCHAR2, -- 'INITIAL'/'UPDATE'
     p_workspace_name    IN VARCHAR2, -- required for INITIAL
     p_app_id            IN NUMBER,   -- required for INITIAL
-    p_allow_overwrite   IN VARCHAR2  -- 'Y'/'N' (INITIAL only)
+    p_allow_overwrite   IN VARCHAR2, -- 'Y'/'N' (INITIAL only)
+    p_auth_scheme_name  IN VARCHAR2  
   );
 END deploy_mgr_pkg;
 /
@@ -2189,7 +2191,8 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
     p_run_id            IN NUMBER,
     p_bundle_id         IN NUMBER,
     p_enable_jobs_after IN BOOLEAN,
-    p_dry_run           IN BOOLEAN
+    p_dry_run           IN BOOLEAN,
+    p_install_mode      IN VARCHAR2 DEFAULT 'UPDATE'
   ) IS
     l_zip BLOB;
   BEGIN
@@ -2251,29 +2254,36 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
       -- Read desired scheme from APP_CONFIG (target-owned)
       --------------------------------------------------------------------
       DECLARE
-        l_scheme_name  VARCHAR2(255);
-        l_ws_id        NUMBER;
-        l_app_id       NUMBER;
-        l_ws_name      VARCHAR2(255);
+        l_ws_name   VARCHAR2(255);
+        l_app_id    NUMBER;
+        l_ws_id     NUMBER;
+        l_off       NUMBER;
+        l_mode      VARCHAR2(10);
       BEGIN
-        l_scheme_name := get_app_config_value('l_auth_scheme_name');
-
-        -- Set workspace context + resolve target app id ONCE
         resolve_apex_target(p_run_id, l_ws_name, l_app_id);
 
         l_ws_id := apex_util.find_security_group_id(p_workspace => l_ws_name);
         apex_util.set_security_group_id(l_ws_id);
 
+        apex_application_install.set_workspace_id(l_ws_id);
         apex_application_install.set_schema(USER);
         apex_application_install.set_application_id(l_app_id);
 
-        -- PRE-IMPORT override only if scheme name is present
-        IF l_scheme_name IS NOT NULL THEN
-          run_log(p_run_id, 'PRE-IMPORT: overriding authentication scheme to "'||l_scheme_name||'"');
-          apex_application_install.set_authentication_scheme(p_name => l_scheme_name);
+        l_mode := UPPER(NVL(p_install_mode,'UPDATE'));
+
+        IF l_mode = 'INITIAL' THEN
+          -- APEX version without apex_application_install.generate_offset
+          l_off := TO_NUMBER(TO_CHAR(SYSTIMESTAMP, 'FF6')) * 1000000000000
+                  + TO_NUMBER(TO_CHAR(SYSDATE, 'J'));
+
+          apex_application_install.set_offset(l_off);
+          run_log(p_run_id, 'PRE-IMPORT: overriding export p_default_id_offset with offset='||l_off||' (INITIAL)');
         ELSE
-          run_log(p_run_id, 'PRE-IMPORT: no l_auth_scheme_name in APP_CONFIG; letting import set auth scheme.');
+          apex_application_install.set_offset(0);
+          run_log(p_run_id, 'PRE-IMPORT: offset=0 (UPDATE)');
         END IF;
+
+        -- keep your auth scheme override logic here (if any)
       END;
 
       --------------------------------------------------------------------
@@ -2427,7 +2437,8 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
     p_install_mode      IN VARCHAR2,  -- 'INITIAL'/'UPDATE'
     p_workspace_name    IN VARCHAR2,  -- required for INITIAL
     p_app_id            IN NUMBER,    -- required for INITIAL
-    p_allow_overwrite   IN VARCHAR2   -- 'Y'/'N' (INITIAL only)
+    p_allow_overwrite   IN VARCHAR2, -- 'Y'/'N' (INITIAL only)
+    p_auth_scheme_name  IN VARCHAR2 
   ) IS
       l_enable_jobs_after BOOLEAN := (NVL(UPPER(p_enable_jobs_after),'N') = 'Y');
       l_dry_run           BOOLEAN := (NVL(UPPER(p_dry_run),'N') = 'Y');
@@ -2470,14 +2481,25 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
           END;
         END IF;
 
-      upsert_app_config(p_run_id, 'APEX_WORKSPACE_NAME', p_workspace_name, l_dry_run);
+        upsert_app_config(p_run_id, 'APEX_WORKSPACE_NAME', p_workspace_name, l_dry_run);
         upsert_app_config(p_run_id, 'APEX_APP_ID',        TO_CHAR(p_app_id), l_dry_run);
+        DECLARE
+          l_auth VARCHAR2(255) := NVL(p_auth_scheme_name, 'Oracle APEX Accounts');
+        BEGIN
+          IF l_auth NOT IN ('Oracle APEX Accounts', 'OCI SSO') THEN
+            raise_application_error(-20040,
+              'Invalid p_auth_scheme_name="'||l_auth||'". Allowed: "Oracle APEX Accounts" or "OCI SSO".');
+          END IF;
+
+          upsert_app_config(p_run_id, 'l_auth_scheme_name', l_auth, l_dry_run);
+        END;
       END IF;
       deploy_bundle_internal(
             p_run_id            => p_run_id,
             p_bundle_id         => p_bundle_id,
             p_enable_jobs_after => l_enable_jobs_after,
-            p_dry_run           => l_dry_run
+            p_dry_run           => l_dry_run,
+            p_install_mode      => p_install_mode
           );
 
     EXCEPTION
@@ -2493,6 +2515,7 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
     p_install_mode      IN VARCHAR2 DEFAULT 'UPDATE', -- 'INITIAL'/'UPDATE'
     p_workspace_name    IN VARCHAR2 DEFAULT NULL,     -- only used for INITIAL
     p_app_id            IN NUMBER   DEFAULT NULL,     -- only used for INITIAL
+    p_auth_scheme_name  IN VARCHAR2 DEFAULT 'Oracle APEX Accounts',
     p_allow_overwrite   IN VARCHAR2 DEFAULT 'N',      -- 'Y'/'N' (INITIAL only)
     o_run_id            OUT NUMBER,
     o_job_name          OUT VARCHAR2
@@ -2508,7 +2531,7 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
         job_name            => l_job_name,
         job_type            => 'STORED_PROCEDURE',
         job_action          => 'DEPLOY_MGR_PKG.DEPLOY_WORKER',
-        number_of_arguments => 8,
+        number_of_arguments => 9,
         enabled             => FALSE,
         auto_drop           => TRUE
       );
@@ -2525,6 +2548,8 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
       DBMS_SCHEDULER.SET_JOB_ARGUMENT_VALUE(l_job_name, 7, CASE WHEN p_app_id IS NULL THEN NULL ELSE TO_CHAR(p_app_id) END);
 
       DBMS_SCHEDULER.SET_JOB_ARGUMENT_VALUE(l_job_name, 8, NVL(p_allow_overwrite,'N'));
+      DBMS_SCHEDULER.SET_JOB_ARGUMENT_VALUE(l_job_name, 9, NVL(p_auth_scheme_name,'Oracle APEX Accounts'));
+
       DBMS_SCHEDULER.ENABLE(l_job_name);
 
       o_job_name := l_job_name;
@@ -2552,7 +2577,8 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
       p_run_id            => l_run_id,
       p_bundle_id         => p_bundle_id,
       p_enable_jobs_after => p_enable_jobs_after,
-      p_dry_run           => p_dry_run
+      p_dry_run           => p_dry_run,
+      p_install_mode      => 'UPDATE'
     );
   END deploy_bundle;
 

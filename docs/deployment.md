@@ -79,9 +79,7 @@ Connect as the application schema owner and run:
 
 ---
 
-### Step 2 — Insert bundle ZIP
-Insert the bundle ZIP into the Deployment Manager bundle table
-(`DEPLOY_BUNDLES`) and capture the generated `BUNDLE_ID`. You must use SQL Developer or equivelant client to upload the zip file as BLOB to the database.
+### Step 2 — Upload bundle ZIP
 
 MANIFSET_JSON example:
 ``` json
@@ -94,15 +92,60 @@ MANIFSET_JSON example:
 }
 ```
 
+#### - SQL Developer 
+Insert the bundle ZIP into the Deployment Manager bundle table
+(`DEPLOY_BUNDLES`) and capture the generated `BUNDLE_ID`.
+
+#### - SQLcl (either installed locally or as part of SQL Developer in VSCode)
+Create the below script locally:
+```sql
+INSERT INTO deploy_bundles (
+    app_id,
+    version_tag,
+    manifest_json,
+    bundle_zip,
+    sha256
+)
+VALUES (
+    :app_id,
+    :version_tag,
+    :manifest_json,
+    EMPTY_BLOB(),
+    :sha256
+)
+RETURNING bundle_zip INTO :blob;
+```
+
+Launch SQLcl inside the same directory as the script above .
+Version Tag, check github version update.
+Manifest JSON, check example above and update accordingly.
+
+Sample execution:
+```sql
+sql demo_user/demo_pwd@db_high <<EOF
+VAR blob BLOB
+EXEC :app_id := 100
+EXEC :version_tag := 'v1.2.3'
+EXEC :manifest_json := '{"app":"focus-reports","version":"1.2.3"}'
+
+@insert_bundle.sql
+LOAD BLOB :blob FROM FILE 'bundle_app1200.zip'
+COMMIT
+EOF
+```
+
+
 ---
 
 ### Step 3 — Deploy (scheduled job only)
 Initial deployment is performed **via scheduler job**, not synchronously. 
-- <b style="color: #ff7b72;">BUNDLE_ID</b> - is the chosen ID during upload in Step 2
-- <b style="color: #ff7b72;">INITIAL</b> - for new installations
-- <b style="color: #ff7b72;">YOUR_WORKSPACE</b> - APEX target workspace name
-- <b style="color: #ff7b72;">APP_ID</b> - target APEX id (default is 1200)
-- <b style="color: #ff7b72;">ALLOW_OVERWRITE</b> - If target APP_ID already exists in target APEX <b><u>Instance</u></b> it will overwrite it. <u>Make sure no application with the same ID exists on the same APEX instance</u>
+- <b style="color: var(--color-prettylights-syntax-keyword);">BUNDLE_ID</b> - Is the chosen ID during upload in Step 2
+- <b style="color: var(--color-prettylights-syntax-keyword);">INITIAL</b> - for new installations
+- <b style="color: var(--color-prettylights-syntax-keyword);">YOUR_WORKSPACE</b> - APEX target workspace name
+- <b style="color: var(--color-prettylights-syntax-keyword);">APP_ID</b> - target APEX id (default is 1200)
+- <b style="color: var(--color-prettylights-syntax-keyword);">ALLOW_OVERWRITE</b> - If target APP_ID already exists in target APEX <b><u>Instance</u></b> it will overwrite it. <u>Make sure no application with the same ID exists on the same APEX instance</u>
+- <b style="color: var(--color-prettylights-syntax-keyword);">AUTH SCHEME NAME</b> - target APP's authentication scheme. APEX's default is <b style="color: var(--color-prettylights-syntax-entity-tag);">'Oracle APEX Accounts'</b>. A 2nd option is <b style="color: varvar(--color-prettylights-syntax-string);">'OCI SSO'</b> but that requires configuring the workspace/app with OAuth for external authentication. Check below for an example of integrating Oracle APEX with OCI IAM domains:
+https://docs.oracle.com/en/learn/apex-identitydomains-sso/index.html
 
 
 ```sql
@@ -115,6 +158,7 @@ BEGIN
     p_install_mode     => 'INITIAL',
     p_workspace_name   => 'YOUR_WORKSPACE',
     p_app_id           => APP_ID,
+    p_auth_scheme_name => 'Oracle APEX Accounts', -- or "OCI SSO" for federated login
     p_allow_overwrite  => 'N',
     o_run_id           => l_run_id,
     o_job_name         => l_job
