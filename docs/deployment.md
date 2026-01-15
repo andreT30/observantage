@@ -144,7 +144,7 @@ Initial deployment is performed **via scheduler job**, not synchronously.
 - <b style="color: #ff7b72;">YOUR_WORKSPACE</b> - APEX target workspace name
 - <b style="color: #ff7b72;">APP_ID</b> - target APEX id (default is 1200)
 - <b style="color: #ff7b72;">ALLOW_OVERWRITE</b> - If target APP_ID already exists in target APEX <b><u>Instance</u></b> it will overwrite it. <u>Make sure no application with the same ID exists on the same APEX instance</u>
-- <b style="color: #ff7b72;">AUTH SCHEME NAME</b> - target APP's authentication scheme. APEX's default is <b style="color: #7ee78;">'Oracle APEX Accounts'</b>. A 2nd option is <b style="color: var#a5d6ff;">'OCI SSO'</b> but that requires configuring the workspace/app with OAuth for external authentication. Check below for an example of integrating Oracle APEX with OCI IAM domains:
+- <b style="color: #ff7b72;">AUTH SCHEME NAME</b> - target APP's authentication scheme. APEX's default is <b style="color: #f7ee78;">'Oracle APEX Accounts'</b>. A 2nd option is <b style="color: #a5d6ff;">'OCI SSO'</b> but that requires configuring the workspace/app with OAuth for external authentication. Check below for an example of integrating Oracle APEX with OCI IAM domains:
 https://docs.oracle.com/en/learn/apex-identitydomains-sso/index.html
 
 
