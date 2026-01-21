@@ -29,8 +29,9 @@ CREATE OR REPLACE PACKAGE deploy_mgr_pkg AS
     p_install_mode      IN VARCHAR2 DEFAULT 'UPDATE', -- 'INITIAL'/'UPDATE'
     p_workspace_name    IN VARCHAR2 DEFAULT NULL,     -- only used for INITIAL
     p_app_id            IN NUMBER   DEFAULT NULL,     -- only used for INITIAL
-    p_auth_scheme_name IN VARCHAR2 DEFAULT 'Oracle APEX Accounts', -- Default Auth Scheme
+    p_auth_scheme_name  IN VARCHAR2 DEFAULT 'Oracle APEX Accounts', -- Default Auth Scheme
     p_allow_overwrite   IN VARCHAR2 DEFAULT 'N',      -- 'Y'/'N' (INITIAL only)
+    p_use_id_offset     IN VARCHAR2 DEFAULT 'N',      -- 'Y'/'N' (INITIAL only)
     o_run_id            OUT NUMBER,
     o_job_name          OUT VARCHAR2
   );
@@ -52,6 +53,7 @@ CREATE OR REPLACE PACKAGE deploy_mgr_pkg AS
     p_workspace_name    IN VARCHAR2, -- required for INITIAL
     p_app_id            IN NUMBER,   -- required for INITIAL
     p_allow_overwrite   IN VARCHAR2, -- 'Y'/'N' (INITIAL only)
+    p_use_id_offset     IN VARCHAR2, -- 'Y'/'N' (INITIAL only)
     p_auth_scheme_name  IN VARCHAR2  
   );
 END deploy_mgr_pkg;
@@ -207,8 +209,6 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
     DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM,'REF_CONSTRAINTS', TRUE);
     DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM,'EMIT_SCHEMA', FALSE);
   END;
-
-  
 
   ------------------------------------------------------------------------------
   -- Strip exporting schema prefix from stored procedure references (jobs/actions)
@@ -586,7 +586,35 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
       RETURN NULL;
   END get_app_config_value;
 
-  
+  ------------------------------------------------------------------------------
+  -- APEX Offset helpers
+  ------------------------------------------------------------------------------  
+  FUNCTION get_app_offset(
+    p_run_id   IN NUMBER,
+    p_ws_name  IN VARCHAR2,
+    p_app_id   IN NUMBER
+  ) RETURN NUMBER
+  IS
+    l_val VARCHAR2(4000);
+    l_key VARCHAR2(200);
+  BEGIN
+    -- Prefer app-specific key (most deterministic)
+    l_key := 'APEX_ID_OFFSET_APP';
+
+    l_val := get_app_config_value(l_key);  -- whatever your existing config getter is
+    IF l_val IS NOT NULL THEN
+      RETURN TO_NUMBER(TRIM(l_val));
+    END IF;
+
+    RETURN 0;
+  EXCEPTION
+    WHEN VALUE_ERROR THEN
+      run_log(p_run_id, 'Invalid numeric value for '||l_key||'="'||NVL(l_val,'NULL')||'". Using 0.');
+      RETURN 0;
+    WHEN OTHERS THEN
+      -- if missing key, just 0
+      RETURN 0;
+  END;
 
   ------------------------------------------------------------------------------
   -- APP_CONFIG bootstrap + APEX target resolution
@@ -2275,6 +2303,7 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
         l_ws_name   VARCHAR2(255);
         l_app_id    NUMBER;
         l_ws_id     NUMBER;
+        l_offset    NUMBER;
         l_off       NUMBER;
         l_mode      VARCHAR2(10);
       BEGIN
@@ -2285,6 +2314,8 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
         run_log(p_run_id, 'APEX target: workspace="'||l_ws_name||'", app_id='||l_app_id);
 
         l_ws_id := apex_util.find_security_group_id(p_workspace => l_ws_name);
+
+        l_offset := get_app_offset(p_run_id, l_ws_name, l_app_id); -- number, default 0
 
         run_log(p_run_id, 'APEX resolved workspace_id='||NVL(TO_CHAR(l_ws_id),'NULL'));
 
@@ -2297,24 +2328,17 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
         END IF;
 
         apex_util.set_security_group_id(l_ws_id);
-        apex_application_install.set_workspace_id(l_ws_id);
+        --apex_application_install.set_workspace_id(l_ws_id);
+        --apex_application_install.set_workspace(p_workspace => l_ws_name);
 
         apex_application_install.set_schema(USER);
         apex_application_install.set_application_id(l_app_id);
 
         l_mode := UPPER(NVL(p_install_mode,'UPDATE'));
 
-        IF l_mode = 'INITIAL' THEN
-          -- APEX version without apex_application_install.generate_offset
-          l_off := TO_NUMBER(TO_CHAR(SYSTIMESTAMP, 'FF6')) * 1000000000000
-                  + TO_NUMBER(TO_CHAR(SYSDATE, 'J'));
-
-          apex_application_install.set_offset(l_off);
-          run_log(p_run_id, 'PRE-IMPORT: overriding export p_default_id_offset with offset='||l_off||' (INITIAL)');
-        ELSE
-          apex_application_install.set_offset(0);
-          run_log(p_run_id, 'PRE-IMPORT: offset=0 (UPDATE)');
-        END IF;
+        -- Use the persisted offset (0 if none). INITIAL should have already written APP_CONFIG.APEX_ID_OFFSET_APP.
+        apex_application_install.set_offset(NVL(l_offset,0));
+        run_log(p_run_id, 'PRE-IMPORT: using offset='||TO_CHAR(NVL(l_offset,0))||' (mode='||l_mode||')');
 
         -- keep your auth scheme override logic here (if any)
       END;
@@ -2470,7 +2494,8 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
     p_install_mode      IN VARCHAR2,  -- 'INITIAL'/'UPDATE'
     p_workspace_name    IN VARCHAR2,  -- required for INITIAL
     p_app_id            IN NUMBER,    -- required for INITIAL
-    p_allow_overwrite   IN VARCHAR2, -- 'Y'/'N' (INITIAL only)
+    p_allow_overwrite   IN VARCHAR2,  -- 'Y'/'N' (INITIAL only)
+    p_use_id_offset     IN VARCHAR2,  -- 'Y'/'N' (INITIAL only)
     p_auth_scheme_name  IN VARCHAR2 
   ) IS
       l_enable_jobs_after BOOLEAN := (NVL(UPPER(p_enable_jobs_after),'N') = 'Y');
@@ -2526,6 +2551,45 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
 
           upsert_app_config(p_run_id, 'l_auth_scheme_name', l_auth, l_dry_run);
         END;
+
+        -- Persist APEX component ID offset for this app copy (used for INITIAL and UPDATE imports)
+        DECLARE
+          l_existing_txt VARCHAR2(4000);
+          l_existing     NUMBER;
+          l_new          NUMBER;
+          l_flag         VARCHAR2(1) := UPPER(NVL(p_use_id_offset,'N'));
+        BEGIN
+          l_existing_txt := get_app_config_value('APEX_ID_OFFSET_APP');
+
+          BEGIN
+            l_existing := CASE WHEN l_existing_txt IS NULL THEN 0 ELSE TO_NUMBER(TRIM(l_existing_txt)) END;
+          EXCEPTION
+            WHEN OTHERS THEN
+              l_existing := 0;
+          END;
+
+          IF l_flag = 'Y' THEN
+            -- If offset already stored, keep it (ensures future UPDATE uses the same offset)
+            IF l_existing IS NULL OR l_existing = 0 THEN
+              -- APEX version without apex_application_install.generate_offset: build a large unique offset
+              l_new := TO_NUMBER(TO_CHAR(SYSTIMESTAMP, 'FF6')) * 1000000000000
+                       + TO_NUMBER(TO_CHAR(SYSDATE, 'J'));
+            ELSE
+              l_new := l_existing;
+            END IF;
+          ELSE
+            -- No offset requested; if an offset already exists, preserve it to avoid breaking future UPDATE imports
+            IF l_existing IS NULL THEN
+              l_new := 0;
+            ELSE
+              l_new := l_existing;
+            END IF;
+          END IF;
+
+          upsert_app_config(p_run_id, 'APEX_ID_OFFSET_APP', TO_CHAR(NVL(l_new,0)), l_dry_run);
+
+          run_log(p_run_id, 'APEX_ID_OFFSET_APP='||TO_CHAR(NVL(l_new,0))||' (p_use_id_offset='||l_flag||')');
+        END;
       END IF;
       deploy_bundle_internal(
             p_run_id            => p_run_id,
@@ -2550,6 +2614,7 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
     p_app_id            IN NUMBER   DEFAULT NULL,     -- only used for INITIAL
     p_auth_scheme_name  IN VARCHAR2 DEFAULT 'Oracle APEX Accounts',
     p_allow_overwrite   IN VARCHAR2 DEFAULT 'N',      -- 'Y'/'N' (INITIAL only)
+    p_use_id_offset     IN VARCHAR2 DEFAULT 'N',      -- 'Y'/'N' (INITIAL only)
     o_run_id            OUT NUMBER,
     o_job_name          OUT VARCHAR2
   ) IS

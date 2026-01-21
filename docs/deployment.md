@@ -143,6 +143,7 @@ Initial deployment is performed **via scheduler job**, not synchronously.
 - $\color{#ff7b72}{\textsf{INITIAL}}$ - for new installations
 - $\color{#ff7b72}{\textsf{YOUR WORKSPACE}}$ - APEX target workspace name
 - $\color{#ff7b72}{\textsf{APP ID}}$ - target APEX id (default is 1200)
+- $\color{#ff7b72}{\textsf{USE ID OFFSET}}$ - in cases where this APP is already installed at least once under the same APEX Instance, you must set it to 'Y' to avoid conflict with existing APEX app components. If this is the first and only app installation, set it to 'N'.
 - $\color{#ff7b72}{\textsf{ALLOW OVERWRITE}}$ - If target APP_ID already exists in target APEX <b><u>Instance</u></b> it will overwrite it. <u>Make sure no application with the same ID exists on the same APEX instance</u>
 - $\color{#ff7b72}{\textsf{AUTH SCHEME NAME}}$ - target APP's authentication scheme. APEX's default is $\color{#f7ee78}{\textsf{'Oracle APEX Accounts'}}$ . A 2nd option is $\color{#a5d6ff}{\textsf{'OCI SSO'}}$ but that requires configuring the workspace/app with OAuth for external authentication. Check below for an example of integrating Oracle APEX with OCI IAM domains:
 https://docs.oracle.com/en/learn/apex-identitydomains-sso/index.html
@@ -158,6 +159,7 @@ BEGIN
     p_install_mode     => 'INITIAL',
     p_workspace_name   => 'YOUR_WORKSPACE',
     p_app_id           => APP_ID,
+    p_use_id_offset    => 'N',
     p_auth_scheme_name => 'Oracle APEX Accounts', -- or "OCI SSO" for federated login
     p_allow_overwrite  => 'N',
     o_run_id           => l_run_id,
