@@ -275,14 +275,14 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
   BEGIN
     DBMS_LOB.CREATETEMPORARY(l_out, TRUE);
 
-    DBMS_LOB.APPEND(l_out,
-      '/* Contexts (hardcoded) */' || CHR(10) || CHR(10) ||
+    DBMS_LOB.APPEND(
+      l_out,
+        '/* Contexts (hardcoded) */' || CHR(10) || CHR(10) ||
 
-      'BEGIN' || CHR(10) ||
-      '  EXECUTE IMMEDIATE ''CREATE OR REPLACE CONTEXT CHATBOT_ENV USING ' ||
-          SYS_CONTEXT('USERENV','CURRENT_SCHEMA') || '.CHATBOT_ENV_PKG'';' || CHR(10) ||
-      'END;' || CHR(10) ||
-      '/' || CHR(10) || CHR(10)
+        'BEGIN' || CHR(10) ||
+        '  EXECUTE IMMEDIATE ''CREATE OR REPLACE CONTEXT CHATBOT_ENV USING CHATBOT_ENV_PKG'';' || CHR(10) ||
+        'END;' || CHR(10) ||
+        '/' || CHR(10) || CHR(10)
     );
 
     RETURN l_out;
