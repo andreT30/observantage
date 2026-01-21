@@ -1531,6 +1531,20 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
         END;
       END LOOP;
 
+    ELSIF p_group = '03a_views' THEN
+      FOR v IN (
+        SELECT view_name
+          FROM user_views
+        ORDER BY view_name
+      ) LOOP
+        IF is_excluded_table(v.view_name) THEN
+          CONTINUE;
+        END IF;
+
+        -- CREATE OR REPLACE VIEW is fine whether it exists or not
+        DBMS_LOB.APPEND(l_out, ensure_or_replace(get_ddl_safe('VIEW', v.view_name)) || CHR(10));
+      END LOOP;
+
     ELSIF p_group = '04_pkg_specs' THEN
       FOR p IN (SELECT object_name FROM user_objects WHERE object_type='PACKAGE' ORDER BY object_name) LOOP
         IF is_excluded_object('PACKAGE', p.object_name) THEN
@@ -1626,11 +1640,13 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
 
     ELSIF p_group = '01a_table_alters' THEN
       FOR c IN (
-        SELECT table_name, column_name
-          FROM user_tab_cols
-         WHERE hidden_column = 'NO'
-           AND virtual_column = 'NO'
-         ORDER BY table_name, column_id
+        SELECT c.table_name, c.column_name
+          FROM user_tab_cols c
+          JOIN user_tables   t
+            ON t.table_name = c.table_name
+        WHERE c.hidden_column  = 'NO'
+          AND c.virtual_column = 'NO'
+        ORDER BY c.table_name, c.column_id
       ) LOOP
         IF is_excluded_table(c.table_name) THEN
           CONTINUE;
@@ -1740,6 +1756,7 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
     l_tmp := export_group('01a_table_alters');APEX_ZIP.ADD_FILE(l_zip,'db/ddl/01a_table_alters.sql', clob_to_blob(l_tmp));
     l_tmp := export_group('02_sequences');   APEX_ZIP.ADD_FILE(l_zip,'db/ddl/02_sequences.sql',   clob_to_blob(l_tmp));
     l_tmp := export_group('03_constraints'); APEX_ZIP.ADD_FILE(l_zip,'db/ddl/03_constraints.sql', clob_to_blob(l_tmp));
+    l_tmp := export_group('03a_views');      APEX_ZIP.ADD_FILE(l_zip,'db/ddl/03a_views.sql',      clob_to_blob(l_tmp));
     l_tmp := export_group('04_pkg_specs');   APEX_ZIP.ADD_FILE(l_zip,'db/ddl/04_pkg_specs.sql',   clob_to_blob(l_tmp));
     l_tmp := export_contexts;                APEX_ZIP.ADD_FILE(l_zip,'db/ddl/05_contexts.sql',    clob_to_blob(l_tmp));
     l_tmp := export_group('06_pkg_bodies');  APEX_ZIP.ADD_FILE(l_zip,'db/ddl/06_pkg_bodies.sql',  clob_to_blob(l_tmp));
