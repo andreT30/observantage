@@ -230,7 +230,7 @@ Update Glossary Rule
 Create Glossary Keyword   
 <img src="/screenshots/chatbot_params3.png" width="600">
 
-Create Workload Rule 
+Create Workload Rule  
 <img src="/screenshots/chatbot_params5.png" width="600">
 
 Keyword Tester
