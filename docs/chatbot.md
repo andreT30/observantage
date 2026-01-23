@@ -229,7 +229,7 @@ Update Glossary Rule
 ![Update Glossary Rule](/screenshots/chatbot_params4.png)
 
 Create Glossary Keyword 
-<img src="/screenshots/chatbot_params3.png" width="1200">
+<img src="/screenshots/chatbot_params3.png" width="600">
 ![Create Glossary Keyword](/screenshots/chatbot_params3.png)
 
 Create Workload Rule 
