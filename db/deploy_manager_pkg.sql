@@ -901,7 +901,7 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
     DBMS_LOB.CREATETEMPORARY(l_out, TRUE);
 
     append_line('/* Seed data for CHATBOT_* tables exported from source environment. */');
-    append_line('/* Tables: CHATBOT_PARAMETERS, CHATBOT_PARAMETER_COMPONENT, CHATBOT_GLOSSARY_RULES, CHATBOT_GLOSSARY_KEYWORDS */');
+    append_line('/* Tables: CHATBOT_PARAMETERS, CHATBOT_PARAMETER_COMPONENT, CHATBOT_GLOSSARY_RULES, CHATBOT_GLOSSARY_KEYWORDS, FR_AUTHZ_GROUPS */');
     append_line('');
 
     --------------------------------------------------------------------------
@@ -1262,6 +1262,81 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
           append_line('');
       END;
     END IF;
+
+    --------------------------------------------------------------------------
+    -- 5) FR_AUTHZ_GROUPS (ADMIN/CONTRIBUTOR/USER)
+    --------------------------------------------------------------------------
+    append_line('/* FR_AUTHZ_GROUPS (ADMIN/CONTRIBUTOR/USER) */');
+    append_line('');
+
+    IF NOT table_exists('FR_AUTHZ_GROUPS') THEN
+      append_line('/* FR_AUTHZ_GROUPS not found; skipping. */');
+      append_line('');
+    ELSE
+      DECLARE
+        c     INTEGER;
+        rc    INTEGER;
+
+        v_gc  VARCHAR2(50);
+        v_ag  VARCHAR2(200);
+        v_sg  VARCHAR2(200);
+        v_wn  VARCHAR2(1000);
+      BEGIN
+        c := DBMS_SQL.OPEN_CURSOR;
+
+        DBMS_SQL.PARSE(
+          c,
+          'SELECT group_code, apex_group, sso_group, workload_name '||
+          '  FROM fr_authz_groups '||
+          ' WHERE group_code IN (''ADMIN'',''CONTRIBUTOR'',''USER'') '||
+          ' ORDER BY group_code',
+          DBMS_SQL.NATIVE
+        );
+
+        DBMS_SQL.DEFINE_COLUMN(c, 1, v_gc, 50);
+        DBMS_SQL.DEFINE_COLUMN(c, 2, v_ag, 200);
+        DBMS_SQL.DEFINE_COLUMN(c, 3, v_sg, 200);
+        DBMS_SQL.DEFINE_COLUMN(c, 4, v_wn, 1000);
+
+        rc := DBMS_SQL.EXECUTE(c);
+
+        WHILE DBMS_SQL.FETCH_ROWS(c) > 0 LOOP
+          DBMS_SQL.COLUMN_VALUE(c, 1, v_gc);
+          DBMS_SQL.COLUMN_VALUE(c, 2, v_ag);
+          DBMS_SQL.COLUMN_VALUE(c, 3, v_sg);
+          DBMS_SQL.COLUMN_VALUE(c, 4, v_wn);
+
+          append(
+            'MERGE INTO FR_AUTHZ_GROUPS t' || CHR(10) ||
+            'USING (' || CHR(10) ||
+            '  SELECT ' || q(v_gc) || ' AS GROUP_CODE,' || CHR(10) ||
+            '         ' || q(v_ag) || ' AS APEX_GROUP,' || CHR(10) ||
+            '         ' || q(v_sg) || ' AS SSO_GROUP,' || CHR(10) ||
+            '         ' || q(v_wn) || ' AS WORKLOAD_NAME' || CHR(10) ||
+            '  FROM dual' || CHR(10) ||
+            ') s' || CHR(10) ||
+            'ON (t.GROUP_CODE = s.GROUP_CODE)' || CHR(10) ||
+            'WHEN MATCHED THEN UPDATE SET' || CHR(10) ||
+            '  t.APEX_GROUP    = s.APEX_GROUP,' || CHR(10) ||
+            '  t.SSO_GROUP     = s.SSO_GROUP,' || CHR(10) ||
+            '  t.WORKLOAD_NAME = s.WORKLOAD_NAME' || CHR(10) ||
+            'WHEN NOT MATCHED THEN INSERT (' || CHR(10) ||
+            '  GROUP_CODE, APEX_GROUP, SSO_GROUP, WORKLOAD_NAME' || CHR(10) ||
+            ') VALUES (' || CHR(10) ||
+            '  s.GROUP_CODE, s.APEX_GROUP, s.SSO_GROUP, s.WORKLOAD_NAME' || CHR(10) ||
+            ');' || CHR(10) || CHR(10)
+          );
+        END LOOP;
+
+        DBMS_SQL.CLOSE_CURSOR(c);
+      EXCEPTION
+        WHEN OTHERS THEN
+          IF DBMS_SQL.IS_OPEN(c) THEN DBMS_SQL.CLOSE_CURSOR(c); END IF;
+          append_line('/* WARN: export FR_AUTHZ_GROUPS failed: '||SQLERRM||' */');
+          append_line('');
+      END;
+    END IF;
+
 
     RETURN l_out;
   END;
