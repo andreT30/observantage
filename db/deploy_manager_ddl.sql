@@ -1,3 +1,9 @@
+/*Copyright (c) 2026 Andre Th (GitHub: observantage)
+
+Licensed under the Polyform Noncommercial License 1.0.
+Commercial use prohibited without permission.
+See LICENSE.md.*/
+
 -- =====================================================================================
 -- BOOTSTRAP: Deployment framework tables + package
 -- Run ONCE per environment (same schema that owns App 1200 objects).

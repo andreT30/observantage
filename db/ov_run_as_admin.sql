@@ -1,3 +1,10 @@
+/*
+Copyright (c) 2026 Andre Th (GitHub: observantage)
+
+Licensed under the Polyform Noncommercial License 1.0.
+Commercial use prohibited without permission.
+See LICENSE.md.
+*/
 CREATE USER "OCI_FOCUS_REPORTS" DEFAULT COLLATION "USING_NLS_COMP" 
    DEFAULT TABLESPACE "DATA"
    TEMPORARY TABLESPACE "TEMP"

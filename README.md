@@ -1,3 +1,5 @@
+License: Polyform Noncommercial 1.0 (Source Available)
+
 # OCI Cost Analytics & NL2SQL Chatbot
 **Oracle APEX • Oracle Autonomous Database • OCI FinOps**
 
@@ -303,3 +305,12 @@ It is ready for:
 ---
 
 **Documentation is part of the product.**
+
+## License
+
+This project is source-available under the Polyform Noncommercial License 1.0.
+
+Non-commercial use is permitted.
+Commercial use is prohibited without explicit authorization.
+
+See LICENSE.md for full terms.

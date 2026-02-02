@@ -1,3 +1,10 @@
+/*
+Copyright (c) 2026 Andre Th (GitHub: observantage)
+
+Licensed under the Polyform Noncommercial License 1.0.
+Commercial use prohibited without permission.
+See LICENSE.md.
+*/
 CREATE OR REPLACE PACKAGE deploy_mgr_pkg AS
   FUNCTION export_bundle(
     p_app_id       IN NUMBER,
