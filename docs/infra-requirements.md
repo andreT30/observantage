@@ -175,7 +175,6 @@ Policy Rules:
 ```
 define tenancy usage-report as ocid1.tenancy.oc1..aaaaaaaaned4fkpkisbwjlr56u7cj63lf3wffbilvqknstgtvzub7vhqkggq
 
-endorse dynamic-group focus-reports-DG to read objects in tenancy usage-report
 endorse dynamic-group focus-reports-ADW-DG to read objects in tenancy usage-report
 
 Allow dynamic-group focus-reports-ADW-DG to inspect compartments in tenancy
