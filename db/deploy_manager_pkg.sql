@@ -1579,8 +1579,12 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
       FOR c IN (
         SELECT c.constraint_name, c.table_name, c.constraint_type
           FROM user_constraints c
-        WHERE c.constraint_type IN ('P','U','C','R')
-          AND c.generated = 'USER NAME'
+        WHERE (
+               -- PK/UK constraints are required parent keys for FKs even when
+               -- Oracle generated their names (e.g. SYS_C...).
+               c.constraint_type IN ('P','U')
+            OR (c.constraint_type IN ('C','R') AND c.generated = 'USER NAME')
+              )
         ORDER BY
           CASE c.constraint_type WHEN 'P' THEN 1 WHEN 'U' THEN 2 WHEN 'C' THEN 3 WHEN 'R' THEN 4 ELSE 9 END,
           c.table_name, c.constraint_name
@@ -1590,9 +1594,10 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
         END IF;
 
         DECLARE
-          l_ddl  CLOB;
-          l_q    CLOB;
-          l_type VARCHAR2(30);
+          l_ddl     CLOB;
+          l_q       CLOB;
+          l_type    VARCHAR2(30);
+          l_col_sig VARCHAR2(32767);
         BEGIN
           l_type := CASE WHEN c.constraint_type = 'R' THEN 'REF_CONSTRAINT' ELSE 'CONSTRAINT' END;
           l_ddl  := get_ddl_safe(l_type, c.constraint_name);
@@ -1618,20 +1623,53 @@ create or replace PACKAGE BODY deploy_mgr_pkg AS
                       '',
                       1, 1, 'in'
                     );
+
+            SELECT LISTAGG(cc.column_name, ',') WITHIN GROUP (ORDER BY cc.position)
+              INTO l_col_sig
+              FROM user_cons_columns cc
+             WHERE cc.constraint_name = c.constraint_name
+               AND cc.table_name      = c.table_name;
           END IF;
 
           l_q := REPLACE(l_ddl, '~', '~~');
 
-          DBMS_LOB.APPEND(l_out,
-            'DECLARE'||CHR(10)||
-            '  l_cnt NUMBER;'||CHR(10)||
-            'BEGIN'||CHR(10)||
-            '  SELECT COUNT(*) INTO l_cnt FROM user_constraints WHERE constraint_name = '''||c.constraint_name||''';'||CHR(10)||
-            '  IF l_cnt = 0 THEN'||CHR(10)||
-            '    EXECUTE IMMEDIATE q''~'||l_q||'~'';'||CHR(10)||
-            '  END IF;'||CHR(10)||
-            'END;'||CHR(10)||'/'||CHR(10)||CHR(10)
-          );
+          IF c.constraint_type IN ('P','U') THEN
+            DBMS_LOB.APPEND(l_out,
+              'DECLARE'||CHR(10)||
+              '  l_cnt NUMBER;'||CHR(10)||
+              'BEGIN'||CHR(10)||
+              '  -- PK/UK guard: name match OR equivalent table/type/ordered-column signature.'||CHR(10)||
+              '  SELECT COUNT(*) INTO l_cnt FROM user_constraints WHERE constraint_name = '''||c.constraint_name||''';'||CHR(10)||
+              '  IF l_cnt = 0 THEN'||CHR(10)||
+              '    SELECT COUNT(*)'||CHR(10)||
+              '      INTO l_cnt'||CHR(10)||
+              '      FROM user_constraints uc'||CHR(10)||
+              '     WHERE uc.table_name = '''||c.table_name||''''||CHR(10)||
+              '       AND uc.constraint_type = '''||c.constraint_type||''''||CHR(10)||
+              '       AND ('||CHR(10)||
+              '             SELECT LISTAGG(ucc.column_name, '','') WITHIN GROUP (ORDER BY ucc.position)'||CHR(10)||
+              '               FROM user_cons_columns ucc'||CHR(10)||
+              '              WHERE ucc.constraint_name = uc.constraint_name'||CHR(10)||
+              '                AND ucc.table_name      = uc.table_name'||CHR(10)||
+              '           ) = '''||REPLACE(l_col_sig, '''', '''''')||''';'||CHR(10)||
+              '  END IF;'||CHR(10)||
+              '  IF l_cnt = 0 THEN'||CHR(10)||
+              '    EXECUTE IMMEDIATE q''~'||l_q||'~'';'||CHR(10)||
+              '  END IF;'||CHR(10)||
+              'END;'||CHR(10)||'/'||CHR(10)||CHR(10)
+            );
+          ELSE
+            DBMS_LOB.APPEND(l_out,
+              'DECLARE'||CHR(10)||
+              '  l_cnt NUMBER;'||CHR(10)||
+              'BEGIN'||CHR(10)||
+              '  SELECT COUNT(*) INTO l_cnt FROM user_constraints WHERE constraint_name = '''||c.constraint_name||''';'||CHR(10)||
+              '  IF l_cnt = 0 THEN'||CHR(10)||
+              '    EXECUTE IMMEDIATE q''~'||l_q||'~'';'||CHR(10)||
+              '  END IF;'||CHR(10)||
+              'END;'||CHR(10)||'/'||CHR(10)||CHR(10)
+            );
+          END IF;
         END;
       END LOOP;
 
